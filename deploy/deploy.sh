@@ -5,17 +5,19 @@ set -e
 REL=/opt/xiaotutu
 [ -f /tmp/bundle_xiaotutu.tar.gz ] || { echo '缺少 /tmp/bundle_xiaotutu.tar.gz'; exit 1; }
 mkdir -p $REL
+# 保留旧 .env（含 IMAGE_TAG / DATABASE_URL）：先备份，解压后再恢复（首次部署无旧 .env 则用 bundle 自带）
+cp $REL/.env /tmp/xiaotutu_env.bak 2>/dev/null || true
 tar xzf /tmp/bundle_xiaotutu.tar.gz -C $REL
-# 保留 .env（含 IMAGE_TAG / DATABASE_URL）
-cp /opt/xiaotutu/.env $REL/.env 2>/dev/null || true
+if [ -f /tmp/xiaotutu_env.bak ]; then cp /tmp/xiaotutu_env.bak $REL/.env; echo '已恢复旧 .env'; fi
 cd $REL
 docker compose -p xiaotutu build
 docker compose -p xiaotutu up -d
-# 健康检查：/api/health 返回 status:ok
+# 健康检查：经 nginx（对外 80）反代到 app，/api/health 返回 status:ok
+# 注：app 只 expose 7780（内部网络），宿主机 7780 不通，须走 80；冷启动导入 onnxruntime/opencv 等较慢，放宽到 120s
 HEALTH=""
-for i in $(seq 1 12); do
+for i in $(seq 1 24); do
   sleep 5
-  HEALTH=$(curl -sS -m 10 http://127.0.0.1:7780/api/health || true)
+  HEALTH=$(curl -sS -m 10 http://127.0.0.1:80/api/health || true)
   echo "$HEALTH" | grep -q '"status": *"ok"' && break
 done
 if echo "$HEALTH" | grep -q '"status": *"ok"'; then
