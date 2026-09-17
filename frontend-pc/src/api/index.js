@@ -119,7 +119,7 @@ llmApi.interceptors.response.use(
   (error) => handle401WithRefresh(error, llmApi)
 )
 
-// ===== 项目管理 =====
+// ===== 识图 =====
 export const drawing = {
   upload: (file) => {
     const formData = new FormData()
@@ -146,7 +146,7 @@ export const drawing = {
   saveSetSummary: (id, data) => api.put(`/drawing/sets/${id}/summary`, data),
 }
 
-// ===== 规范库 =====
+// ===== 审计日志 =====
 export const audit = {
   logs: (params) => api.get('/audit/logs', { params }),
   eventTypes: () => api.get('/audit/event-types'),

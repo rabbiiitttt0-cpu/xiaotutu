@@ -37,18 +37,6 @@
             <el-tag v-else type="info" size="small">成员</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="功能权限" min-width="260">
-          <template #default="{ row }">
-            <div class="permission-tags">
-              <el-tag v-if="row.can_use_plan_writing" size="small" type="success">方案编写</el-tag>
-              <el-tag v-if="row.can_use_quality_mgmt" size="small" type="success">方案验收</el-tag>
-              <el-tag v-if="row.can_use_drawing" size="small" type="success">看图助手</el-tag>
-              <el-tag v-if="row.can_use_disclosure" size="small" type="success">快速交底</el-tag>
-              <el-tag v-if="row.can_use_library" size="small" type="success">资料库</el-tag>
-              <el-tag v-if="row.can_use_settings" size="small" type="warning">系统设置</el-tag>
-            </div>
-          </template>
-        </el-table-column>
         <el-table-column label="状态" width="80">
           <template #default="{ row }">
             <el-tag :type="row.is_active ? 'success' : 'danger'" size="small">
@@ -106,25 +94,6 @@
         <el-form-item label="超级管理员" v-if="authStore.isSuperAdmin">
           <el-switch v-model="form.is_super_admin" />
         </el-form-item>
-        <el-divider content-position="left">功能模块权限</el-divider>
-        <el-form-item label="方案编写">
-          <el-switch v-model="form.can_use_plan_writing" />
-        </el-form-item>
-        <el-form-item label="方案验收">
-          <el-switch v-model="form.can_use_quality_mgmt" />
-        </el-form-item>
-        <el-form-item label="看图助手">
-          <el-switch v-model="form.can_use_drawing" />
-        </el-form-item>
-        <el-form-item label="快速交底">
-          <el-switch v-model="form.can_use_disclosure" />
-        </el-form-item>
-        <el-form-item label="资料库">
-          <el-switch v-model="form.can_use_library" />
-        </el-form-item>
-        <el-form-item label="系统设置">
-          <el-switch v-model="form.can_use_settings" />
-        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -162,12 +131,6 @@ const form = reactive({
   email: '',
   phone: '',
   is_super_admin: false,
-  can_use_plan_writing: true,
-  can_use_quality_mgmt: true,
-  can_use_drawing: true,
-  can_use_disclosure: true,
-  can_use_library: true,
-  can_use_settings: false,
 })
 
 const formRules = {
@@ -214,12 +177,6 @@ function showEditDialog(user) {
     email: user.email || '',
     phone: user.phone || '',
     is_super_admin: user.is_super_admin,
-    can_use_plan_writing: user.can_use_plan_writing,
-    can_use_quality_mgmt: user.can_use_quality_mgmt,
-    can_use_drawing: user.can_use_drawing,
-    can_use_disclosure: user.can_use_disclosure,
-    can_use_library: user.can_use_library,
-    can_use_settings: user.can_use_settings,
   })
   dialogVisible.value = true
 }
@@ -232,12 +189,6 @@ function resetForm() {
     email: '',
     phone: '',
     is_super_admin: false,
-    can_use_plan_writing: true,
-    can_use_quality_mgmt: true,
-    can_use_drawing: true,
-    can_use_disclosure: true,
-    can_use_library: true,
-    can_use_settings: false,
   })
 }
 
@@ -253,12 +204,6 @@ async function submitForm() {
         email: form.email || undefined,
         phone: form.phone || undefined,
         is_super_admin: form.is_super_admin,
-        can_use_plan_writing: form.can_use_plan_writing,
-        can_use_quality_mgmt: form.can_use_quality_mgmt,
-        can_use_drawing: form.can_use_drawing,
-        can_use_disclosure: form.can_use_disclosure,
-        can_use_library: form.can_use_library,
-        can_use_settings: form.can_use_settings,
       }
       await adminUsers.update(editingId.value, data)
       ElMessage.success('用户已更新')
@@ -270,12 +215,6 @@ async function submitForm() {
         email: form.email || undefined,
         phone: form.phone || undefined,
         is_super_admin: form.is_super_admin,
-        can_use_plan_writing: form.can_use_plan_writing,
-        can_use_quality_mgmt: form.can_use_quality_mgmt,
-        can_use_drawing: form.can_use_drawing,
-        can_use_disclosure: form.can_use_disclosure,
-        can_use_library: form.can_use_library,
-        can_use_settings: form.can_use_settings,
       })
       ElMessage.success('用户已创建')
     }
@@ -303,7 +242,7 @@ async function toggleActive(user) {
 async function permanentDelete(user) {
   try {
     await ElMessageBox.confirm(
-      `确定要彻底删除账号 ${user.username} 吗？\n该操作不可恢复，用户的项目成员关系与授权记录将一并清除（其创建的项目数据保留）。`,
+      `确定要彻底删除账号 ${user.username} 吗？\n该操作不可恢复，请谨慎操作。`,
       '危险操作',
       { type: 'error', confirmButtonText: '彻底删除', cancelButtonText: '取消' }
     )
@@ -336,10 +275,5 @@ onMounted(() => {
 }
 .toolbar {
   margin-bottom: 16px;
-}
-.permission-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
 }
 </style>

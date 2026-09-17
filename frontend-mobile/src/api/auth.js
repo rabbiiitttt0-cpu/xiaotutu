@@ -49,7 +49,4 @@ export const adminUsers = {
   update: (id, data) => authApi.put(`/admin/users/${id}`, data),
   delete: (id) => authApi.delete(`/admin/users/${id}`),
   permanentDelete: (id) => authApi.delete(`/admin/users/${id}/permanent`),
-  listAll: () => authApi.get('/admin/users/list'),  // 供选择添加成员
 }
-
-// ===== 项目成员 =====

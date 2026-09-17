@@ -107,6 +107,72 @@
           />
         </el-tab-pane>
 
+        <!-- ============ 视觉模型用量 ============ -->
+        <el-tab-pane label="视觉模型用量" name="vision">
+          <el-row :gutter="12" style="margin-bottom: 12px">
+            <el-col :span="6">
+              <el-card shadow="never" class="stat-card">
+                <div class="stat-num">{{ vision.total.requests ?? 0 }}</div>
+                <div class="stat-label">累计请求（带图 {{ vision.total.with_image ?? 0 }}）</div>
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="never" class="stat-card">
+                <div class="stat-num">{{ (vision.total.prompt_tokens || 0).toLocaleString() }}</div>
+                <div class="stat-label">输入 tokens（缓存命中 {{ (vision.total.cache_hit_tokens || 0).toLocaleString() }}）</div>
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="never" class="stat-card">
+                <div class="stat-num">{{ (vision.total.completion_tokens || 0).toLocaleString() }}</div>
+                <div class="stat-label">输出 tokens</div>
+              </el-card>
+            </el-col>
+            <el-col :span="6">
+              <el-card shadow="never" class="stat-card">
+                <div class="stat-num">${{ vision.total.est_cost_usd ?? 0 }}</div>
+                <div class="stat-label">估算费用</div>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <div class="cost-note">{{ vision.cost_note }}</div>
+
+          <h4 class="sub-title">近 14 天</h4>
+          <el-table :data="vision.by_day" stripe size="small" border style="margin-bottom: 16px">
+            <el-table-column prop="date" label="日期" width="120" />
+            <el-table-column prop="requests" label="请求" width="90" />
+            <el-table-column prop="with_image" label="带图" width="90" />
+            <el-table-column label="输入tokens" width="130">
+              <template #default="{ row }">{{ (row.prompt_tokens || 0).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column label="输出tokens" width="130">
+              <template #default="{ row }">{{ (row.completion_tokens || 0).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column label="估算费用" min-width="120">
+              <template #default="{ row }">${{ row.est_cost_usd }}</template>
+            </el-table-column>
+          </el-table>
+
+          <h4 class="sub-title">最近调用</h4>
+          <el-table :data="vision.recent" stripe size="small" border>
+            <el-table-column prop="ts" label="时间" width="170" />
+            <el-table-column prop="endpoint" label="功能" width="110" />
+            <el-table-column label="带图" width="70">
+              <template #default="{ row }">{{ row.with_image ? '是' : '否' }}</template>
+            </el-table-column>
+            <el-table-column label="输入tokens" width="110">
+              <template #default="{ row }">{{ (row.prompt_tokens || 0).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column label="输出tokens" width="110">
+              <template #default="{ row }">{{ (row.completion_tokens || 0).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column label="缓存命中" width="100">
+              <template #default="{ row }">{{ (row.cache_hit_tokens || 0).toLocaleString() }}</template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
         <!-- ============ 系统错误日志 ============ -->
         <el-tab-pane label="系统错误日志" name="errors">
           <el-form inline size="small" style="margin-bottom: 12px">
@@ -136,7 +202,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { audit as auditApi } from '../../api'
+import { audit as auditApi, drawing as drawingApi } from '../../api'
 
 const tab = ref('audit')
 
@@ -231,6 +297,21 @@ async function loadLlmStats() {
   } catch { /* 静默 */ }
 }
 
+// ===== 视觉模型用量（识图模块 LLM 用量，仅超管）=====
+const vision = ref({ total: {}, by_day: [], recent: [], cost_note: '' })
+
+async function loadVisionUsage() {
+  try {
+    const { data } = await drawingApi.usage()
+    vision.value = {
+      total: data.total || {},
+      by_day: data.by_day || [],
+      recent: data.recent || [],
+      cost_note: data.cost_note || '',
+    }
+  } catch { /* 静默（非超管无权限） */ }
+}
+
 // ===== 系统错误日志 =====
 const errorItems = ref([])
 const errorTotal = ref(0)
@@ -259,6 +340,7 @@ onMounted(() => {
   loadAudit(1)
   loadLlm(1)
   loadLlmStats()
+  loadVisionUsage()
   loadErrors()
 })
 </script>
@@ -269,6 +351,8 @@ onMounted(() => {
 .stat-card { text-align: center; }
 .stat-num { font-size: 26px; font-weight: 600; color: #409eff; }
 .stat-label { font-size: 12px; color: #909399; margin-top: 4px; }
+.cost-note { font-size: 12px; color: #909399; margin-bottom: 12px; }
+.sub-title { margin: 0 0 8px; font-size: 14px; color: #303133; }
 .error-log-box {
   background: #1e1e1e;
   color: #d4d4d4;
