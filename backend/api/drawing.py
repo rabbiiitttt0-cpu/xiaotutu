@@ -6,6 +6,7 @@
 """
 import base64
 import json
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -157,6 +158,7 @@ async def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_curr
         dxf_path = UPLOAD_DIR / f"{file_id}.dxf"
         ok, msg = convert_dwg_to_dxf(str(saved_path), str(dxf_path))
         if not ok:
+            logging.getLogger("app").error("DWG 转换失败: file=%s id=%s msg=%s", file.filename, file_id, msg)
             saved_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400,
                                 detail=f"DWG 转换失败（{msg}）。请用 CAD 软件将该图另存为 DXF 后上传")
@@ -189,6 +191,11 @@ async def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_curr
             info["has_image"] = bool(png)
             info["image_count"] = 1 if png else 0
     except Exception as e:
+        import traceback
+        logging.getLogger("app").error(
+            "图纸解析失败: file=%s id=%s suffix=%s error=%s\n%s",
+            file.filename, file_id, suffix, e, traceback.format_exc(),
+        )
         saved_path.unlink(missing_ok=True)
         dxf_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"图纸解析失败: {str(e)}")

@@ -916,18 +916,26 @@ async function uploadFile() {
     // 并行上传（全部新增文件同时解析，比串行快 N 倍）
     const results = await Promise.allSettled(pending.map(f => drawingApi.upload(f.raw)))
     const fileIds = []
-    let failCount = 0
+    const failed = []
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') {
         pending[i].uploaded = true
         pending[i].file_id = r.value.data.file_id
         fileIds.push(r.value.data.file_id)
       } else {
-        failCount++
-        console.error('文件解析失败:', pending[i].name, r.reason)
+        const detail = r.reason?.response?.data?.detail || r.reason?.message || '未知原因'
+        pending[i].failed = true
+        failed.push({ name: pending[i].name, detail })
+        console.error('文件解析失败:', pending[i].name, detail)
       }
     })
-    if (failCount) ElMessage.warning(`${failCount} 个文件解析失败（已跳过，可从列表删除）`)
+    if (failed.length) {
+      const first = failed[0]
+      const summary = failed.length === 1
+        ? `「${first.name}」解析失败：${first.detail}`
+        : `「${first.name}」等 ${failed.length} 个文件解析失败，首个原因：${first.detail}`
+      ElMessage.error({ message: summary, duration: 8000 })
+    }
     if (fileIds.length) {
       const { data: setData } = await drawingApi.createSet({
         file_ids: fileIds,
