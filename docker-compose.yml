@@ -1,0 +1,30 @@
+# ===== 小图兔 生产编排（compose 项目名 -p xiaotutu，与同舟智航隔离）=====
+services:
+  app:
+    image: xiaotutu-app:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xiaotutu-app
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    mem_limit: 3g          # 内存上限，OOM 只杀自己不拖垮别的服务
+    expose:
+      - "7780"
+
+  nginx:
+    image: nginx:alpine
+    container_name: xiaotutu-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./data/letsencrypt:/etc/letsencrypt:ro
+      - ./data/www:/var/www/html:ro
+    depends_on:
+      - app
