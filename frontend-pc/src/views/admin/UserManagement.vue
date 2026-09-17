@@ -1,0 +1,345 @@
+<template>
+  <div class="user-management">
+    <div class="page-header">
+      <h2>用户管理</h2>
+      <el-button type="primary" @click="showCreateDialog">
+        <el-icon><Plus /></el-icon> 添加用户
+      </el-button>
+    </div>
+
+    <el-card>
+      <div class="toolbar">
+        <el-input
+          v-model="searchText"
+          placeholder="搜索用户名/邮箱/手机号"
+          :prefix-icon="Search"
+          clearable
+          style="width: 280px"
+        />
+      </div>
+
+      <el-table :data="filteredUsers" stripe v-loading="loading">
+        <el-table-column prop="username" label="用户名" width="120" />
+        <el-table-column prop="display_name" label="显示名" width="120" />
+        <el-table-column prop="email" label="邮箱" width="180">
+          <template #default="{ row }">
+            {{ row.email || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="phone" label="手机号" width="130">
+          <template #default="{ row }">
+            {{ row.phone || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="角色" width="100">
+          <template #default="{ row }">
+            <el-tag v-if="row.is_super_admin" type="danger" size="small">超级管理员</el-tag>
+            <el-tag v-else type="info" size="small">成员</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="功能权限" min-width="260">
+          <template #default="{ row }">
+            <div class="permission-tags">
+              <el-tag v-if="row.can_use_plan_writing" size="small" type="success">方案编写</el-tag>
+              <el-tag v-if="row.can_use_quality_mgmt" size="small" type="success">方案验收</el-tag>
+              <el-tag v-if="row.can_use_drawing" size="small" type="success">看图助手</el-tag>
+              <el-tag v-if="row.can_use_disclosure" size="small" type="success">快速交底</el-tag>
+              <el-tag v-if="row.can_use_library" size="small" type="success">资料库</el-tag>
+              <el-tag v-if="row.can_use_settings" size="small" type="warning">系统设置</el-tag>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="80">
+          <template #default="{ row }">
+            <el-tag :type="row.is_active ? 'success' : 'danger'" size="small">
+              {{ row.is_active ? '启用' : '禁用' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="showEditDialog(row)">编辑</el-button>
+            <el-button
+              link
+              :type="row.is_active ? 'danger' : 'success'"
+              @click="toggleActive(row)"
+              v-if="row.id !== currentUserId"
+            >
+              {{ row.is_active ? '禁用' : '启用' }}
+            </el-button>
+            <el-button
+              link
+              type="danger"
+              v-if="authStore.isSuperAdmin && !row.is_active && !row.is_super_admin && row.id !== currentUserId"
+              @click="permanentDelete(row)"
+            >
+              删除
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <!-- 创建/编辑用户弹窗 -->
+    <el-dialog
+      v-model="dialogVisible"
+      :title="isEdit ? '编辑用户' : '添加用户'"
+      width="500px"
+      @close="resetForm"
+    >
+      <el-form ref="formRef" :model="form" :rules="formRules" label-width="100px">
+        <el-form-item label="用户名" prop="username">
+          <el-input v-model="form.username" :disabled="isEdit" placeholder="用户名" />
+        </el-form-item>
+        <el-form-item label="密码" prop="password" v-if="!isEdit">
+          <el-input v-model="form.password" type="password" show-password placeholder="至少6位" />
+        </el-form-item>
+        <el-form-item label="显示名">
+          <el-input v-model="form.display_name" placeholder="显示名称" />
+        </el-form-item>
+        <el-form-item label="邮箱">
+          <el-input v-model="form.email" placeholder="邮箱（可选）" />
+        </el-form-item>
+        <el-form-item label="手机号">
+          <el-input v-model="form.phone" placeholder="手机号（可选）" />
+        </el-form-item>
+        <el-form-item label="超级管理员" v-if="authStore.isSuperAdmin">
+          <el-switch v-model="form.is_super_admin" />
+        </el-form-item>
+        <el-divider content-position="left">功能模块权限</el-divider>
+        <el-form-item label="方案编写">
+          <el-switch v-model="form.can_use_plan_writing" />
+        </el-form-item>
+        <el-form-item label="方案验收">
+          <el-switch v-model="form.can_use_quality_mgmt" />
+        </el-form-item>
+        <el-form-item label="看图助手">
+          <el-switch v-model="form.can_use_drawing" />
+        </el-form-item>
+        <el-form-item label="快速交底">
+          <el-switch v-model="form.can_use_disclosure" />
+        </el-form-item>
+        <el-form-item label="资料库">
+          <el-switch v-model="form.can_use_library" />
+        </el-form-item>
+        <el-form-item label="系统设置">
+          <el-switch v-model="form.can_use_settings" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitForm">
+          {{ isEdit ? '保存' : '创建' }}
+        </el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, computed, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Search } from '@element-plus/icons-vue'
+import { adminUsers } from '../../api/auth'
+import { useAuthStore } from '../../stores/auth'
+
+const authStore = useAuthStore()
+const currentUserId = computed(() => authStore.userId)
+
+const loading = ref(false)
+const submitting = ref(false)
+const users = ref([])
+const searchText = ref('')
+const dialogVisible = ref(false)
+const isEdit = ref(false)
+const editingId = ref(null)
+const formRef = ref(null)
+
+const form = reactive({
+  username: '',
+  password: '',
+  display_name: '',
+  email: '',
+  phone: '',
+  is_super_admin: false,
+  can_use_plan_writing: true,
+  can_use_quality_mgmt: true,
+  can_use_drawing: true,
+  can_use_disclosure: true,
+  can_use_library: true,
+  can_use_settings: false,
+})
+
+const formRules = {
+  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
+}
+
+const filteredUsers = computed(() => {
+  if (!searchText.value) return users.value
+  const keyword = searchText.value.toLowerCase()
+  return users.value.filter(u =>
+    u.username?.toLowerCase().includes(keyword) ||
+    u.email?.toLowerCase().includes(keyword) ||
+    u.phone?.includes(keyword)
+  )
+})
+
+async function loadUsers() {
+  loading.value = true
+  try {
+    const res = await adminUsers.list()
+    users.value = res.data
+  } catch (e) {
+    ElMessage.error('加载用户列表失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+function showCreateDialog() {
+  isEdit.value = false
+  editingId.value = null
+  resetForm()
+  dialogVisible.value = true
+}
+
+function showEditDialog(user) {
+  isEdit.value = true
+  editingId.value = user.id
+  Object.assign(form, {
+    username: user.username,
+    password: '',
+    display_name: user.display_name || '',
+    email: user.email || '',
+    phone: user.phone || '',
+    is_super_admin: user.is_super_admin,
+    can_use_plan_writing: user.can_use_plan_writing,
+    can_use_quality_mgmt: user.can_use_quality_mgmt,
+    can_use_drawing: user.can_use_drawing,
+    can_use_disclosure: user.can_use_disclosure,
+    can_use_library: user.can_use_library,
+    can_use_settings: user.can_use_settings,
+  })
+  dialogVisible.value = true
+}
+
+function resetForm() {
+  Object.assign(form, {
+    username: '',
+    password: '',
+    display_name: '',
+    email: '',
+    phone: '',
+    is_super_admin: false,
+    can_use_plan_writing: true,
+    can_use_quality_mgmt: true,
+    can_use_drawing: true,
+    can_use_disclosure: true,
+    can_use_library: true,
+    can_use_settings: false,
+  })
+}
+
+async function submitForm() {
+  const valid = await formRef.value?.validate().catch(() => false)
+  if (!valid) return
+
+  submitting.value = true
+  try {
+    if (isEdit.value) {
+      const data = {
+        display_name: form.display_name,
+        email: form.email || undefined,
+        phone: form.phone || undefined,
+        is_super_admin: form.is_super_admin,
+        can_use_plan_writing: form.can_use_plan_writing,
+        can_use_quality_mgmt: form.can_use_quality_mgmt,
+        can_use_drawing: form.can_use_drawing,
+        can_use_disclosure: form.can_use_disclosure,
+        can_use_library: form.can_use_library,
+        can_use_settings: form.can_use_settings,
+      }
+      await adminUsers.update(editingId.value, data)
+      ElMessage.success('用户已更新')
+    } else {
+      await adminUsers.create({
+        username: form.username,
+        password: form.password,
+        display_name: form.display_name,
+        email: form.email || undefined,
+        phone: form.phone || undefined,
+        is_super_admin: form.is_super_admin,
+        can_use_plan_writing: form.can_use_plan_writing,
+        can_use_quality_mgmt: form.can_use_quality_mgmt,
+        can_use_drawing: form.can_use_drawing,
+        can_use_disclosure: form.can_use_disclosure,
+        can_use_library: form.can_use_library,
+        can_use_settings: form.can_use_settings,
+      })
+      ElMessage.success('用户已创建')
+    }
+    dialogVisible.value = false
+    await loadUsers()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '操作失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function toggleActive(user) {
+  const action = user.is_active ? '禁用' : '启用'
+  try {
+    await ElMessageBox.confirm(`确定要${action}用户 ${user.username} 吗？`, '确认', {
+      type: 'warning',
+    })
+    await adminUsers.update(user.id, { is_active: !user.is_active })
+    ElMessage.success(`用户已${action}`)
+    await loadUsers()
+  } catch {}
+}
+
+async function permanentDelete(user) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要彻底删除账号 ${user.username} 吗？\n该操作不可恢复，用户的项目成员关系与授权记录将一并清除（其创建的项目数据保留）。`,
+      '危险操作',
+      { type: 'error', confirmButtonText: '彻底删除', cancelButtonText: '取消' }
+    )
+    await adminUsers.permanentDelete(user.id)
+    ElMessage.success('账号已彻底删除')
+    await loadUsers()
+  } catch {}
+}
+
+onMounted(() => {
+  loadUsers()
+})
+</script>
+
+<style scoped>
+.user-management {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  color: #303133;
+}
+.toolbar {
+  margin-bottom: 16px;
+}
+.permission-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+</style>
