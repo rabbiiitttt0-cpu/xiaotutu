@@ -162,7 +162,7 @@ export const projects = {
     formData.append('file', file)
     return api.post(`/projects/${id}/drawings/zip`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 300000,  // 大压缩包上传放宽到 5 分钟
+      timeout: 600000,  // 400MB+ 整卷图纸压缩包放宽到 10 分钟（对齐 nginx 超时）
     })
   },
   patchDrawing: (id, did, data) => api.patch(`/projects/${id}/drawings/${did}`, data),
