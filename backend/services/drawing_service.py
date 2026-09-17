@@ -6,8 +6,36 @@ from pathlib import Path
 
 import ezdxf
 from ezdxf import recover
+from ezdxf.tools import crypt as _crypt
 
 _LIBREDWG_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "bin" / "libredwg"
+
+
+def _crypt_decode_safe(text_lines):
+    """ezdxf 原生 crypt.decode 内部 bytes(text, 'ascii')，LibreDWG 转出的 DXF
+    里 ACIS SAT 段混入中文（如「云中心建筑图」）直接 UnicodeEncodeError 让整份
+    图纸解析失败。这里复制官方实现，仅把 ascii 换成 latin-1（值域一一对应，
+    高位字节按 chr(c ^ 0x5F) 原样处理，绝不抛异常）。"""
+    def _decode(text):
+        dectab = _crypt._decode_table
+        s = []
+        text = text.encode("latin-1", errors="ignore")
+        skip = False
+        for c in text:
+            if skip:
+                skip = False
+                continue
+            if c in dectab:
+                s += dectab[c]
+                skip = (c == 0x5E)
+            else:
+                s += chr(c ^ 0x5F)
+        return "".join(s)
+    return (_decode(line) for line in text_lines)
+
+
+if getattr(_crypt.decode, "__name__", "") != "_crypt_decode_safe":
+    _crypt.decode = _crypt_decode_safe
 
 
 def convert_dwg_to_dxf(dwg_path: str, dxf_path: str) -> tuple[bool, str]:
