@@ -1,6 +1,7 @@
 # 运行时数据（含密钥 app_config.json / pg_config.json，勿入库）
 data/
 output/
+pgdata/
 
 # Python
 __pycache__/
