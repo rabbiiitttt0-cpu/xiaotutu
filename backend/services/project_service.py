@@ -138,9 +138,9 @@ def process_drawing(drawing_id: int):
         cmap = load_project_cipher(pdir)
         masked_info = mask_info(info, cmap)
         save_project_cipher(pdir, cmap)
-        # 原始解析结果仅服务端留存（不出 API）
+        # 原始解析结果仅服务端留存（不出 API）；errors=replace 兜底其他来源的坏字符
         (pdir / f"{fid}.parsed.json").write_text(
-            json.dumps(info, ensure_ascii=False), encoding="utf-8")
+            json.dumps(info, ensure_ascii=False), encoding="utf-8", errors="replace")
 
         # 4. 渲染预览（落 UPLOAD_DIR，直接复用识图问答/预览机制）
         if suffix == ".pdf":
@@ -159,7 +159,7 @@ def process_drawing(drawing_id: int):
 
         # 5. 脱敏上下文落盘（chat/preview 直接读取）
         ctx_tmp = UPLOAD_DIR / f"{fid}.json.tmp"
-        ctx_tmp.write_text(json.dumps(masked_info, ensure_ascii=False), encoding="utf-8")
+        ctx_tmp.write_text(json.dumps(masked_info, ensure_ascii=False), encoding="utf-8", errors="replace")
         (UPLOAD_DIR / f"{fid}.json.tmp").replace(UPLOAD_DIR / f"{fid}.json")
 
         rec.status = "ready"

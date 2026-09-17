@@ -539,6 +539,18 @@ const setId = ref('')
 const sheets = ref([])
 const activeSheetId = ref('')
 
+// ===== 项目图纸模式：状态 =====
+
+const sourceMode = ref('upload')        // upload 本地上传 | project 项目图纸
+const myProjects = ref([])              // 我参与的项目
+const activeProjectId = ref(null)       // 当前选中项目
+const projDrawings = ref([])            // 项目图纸列表（常用/全部）
+const projSets = ref([])                // 项目图纸集
+const selectedDrawingIds = ref([])      // 勾选的项目图纸
+const showAllDrawings = ref(false)      // 常用 | 全部 开关
+const projApplying = ref(false)         // 开始问答加载中
+const projSessionId = ref(0)            // 项目会话 id（0=未建）
+
 // ===== 项目图纸模式（函数） =====
 
 async function loadMyProjects() {

@@ -25,7 +25,8 @@ with client:  # lifespan: init_db + worker + cleaner
     admin = login("admin", "admin123")
 
     # 1. 建项目
-    r = client.post("/api/projects", json={"name": "测试项目A", "description": "冒烟"}, headers=admin)
+    pname = f"测试项目{int(time.time()) % 100000}"
+    r = client.post("/api/projects", json={"name": pname, "description": "冒烟"}, headers=admin)
     assert r.status_code == 200, r.text
     pid = r.json()["id"]
     print("1. 项目创建 OK, id =", pid)

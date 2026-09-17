@@ -43,6 +43,13 @@ def convert_dwg_to_dxf(dwg_path: str, dxf_path: str) -> tuple[bool, str]:
     return False, "DWG 转换器不可用（LibreDWG 缺失且未安装 ODA File Converter）"
 
 
+def clean_text(s: str) -> str:
+    """剔除孤立的 UTF-16 代理对（DWG 常见坏编码），否则落盘/送 LLM 时 utf-8 编码炸"""
+    if not s:
+        return s
+    return "".join(c for c in s if not (0xD800 <= ord(c) <= 0xDFFF))
+
+
 def parse_dxf(file_path: str, display_name: str | None = None) -> dict:
     """解析DXF文件，提取图纸信息。display_name：展示用原始文件名
     （上传场景文件以 file_id 落盘，不传则描述里全是内部名 dxf_xxx.dxf）"""
@@ -83,7 +90,7 @@ def parse_dxf(file_path: str, display_name: str | None = None) -> dict:
         if etype == "TEXT":
             try:
                 text_annotations.append({
-                    "text": entity.dxf.text,
+                    "text": clean_text(entity.dxf.text),
                     "layer": entity.dxf.layer,
                     "position": [entity.dxf.insert.x, entity.dxf.insert.y],
                 })
@@ -92,7 +99,7 @@ def parse_dxf(file_path: str, display_name: str | None = None) -> dict:
         elif etype == "MTEXT":
             try:
                 text_annotations.append({
-                    "text": entity.plain_text(),
+                    "text": clean_text(entity.plain_text()),
                     "layer": entity.dxf.layer,
                     "position": [entity.dxf.insert.x, entity.dxf.insert.y],
                 })
@@ -106,14 +113,14 @@ def parse_dxf(file_path: str, display_name: str | None = None) -> dict:
                     vtype = ve.dxftype()
                     if vtype == "TEXT":
                         text_annotations.append({
-                            "text": ve.dxf.text,
+                            "text": clean_text(ve.dxf.text),
                             "layer": ve.dxf.layer,
                             "position": [ve.dxf.insert.x, ve.dxf.insert.y],
                             "from_block": entity.dxf.name,
                         })
                     elif vtype == "MTEXT":
                         text_annotations.append({
-                            "text": ve.plain_text(),
+                            "text": clean_text(ve.plain_text()),
                             "layer": ve.dxf.layer,
                             "position": [ve.dxf.insert.x, ve.dxf.insert.y],
                             "from_block": entity.dxf.name,
