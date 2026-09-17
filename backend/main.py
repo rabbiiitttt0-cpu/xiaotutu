@@ -1,4 +1,4 @@
-"""小图兔 - 图纸识别助手（统一 FastAPI 后端）"""
+"""看图兔 - 图纸识别助手（统一 FastAPI 后端）"""
 import logging
 from logging.handlers import RotatingFileHandler
 from contextlib import asynccontextmanager
@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="小图兔 - 图纸识别助手",
+    title="看图兔 - 图纸识别助手",
     description="独立的工程图纸识别助手",
     version="1.0.0",
     lifespan=lifespan,
@@ -99,7 +99,7 @@ app.include_router(status_router, dependencies=[Depends(get_current_user)])  # /
 async def health():
     return {
         "status": "ok",
-        "system": "小图兔 - 图纸识别助手",
+        "system": "看图兔 - 图纸识别助手",
         "version": "1.0.0",
         "description": "独立的工程图纸识别助手 — 看图、问答、材料提取、快速交底",
     }

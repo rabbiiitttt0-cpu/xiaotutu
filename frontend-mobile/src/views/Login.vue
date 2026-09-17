@@ -2,8 +2,8 @@
   <div class="login-page">
     <!-- 品牌区 -->
     <div class="brand">
-      <div class="brand-logo">🐰</div>
-      <h1 class="brand-title">小图兔</h1>
+      <img src="/logo.png" alt="看图兔" class="brand-logo" />
+      <h1 class="brand-title">看图兔</h1>
       <p class="brand-sub">工程图纸识别助手</p>
     </div>
 
@@ -127,7 +127,7 @@ async function handleRegister() {
   color: #fff;
   text-align: center;
 }
-.brand-logo { font-size: 56px; line-height: 1; }
+.brand-logo { height: 72px; width: auto; display: inline-block; }
 .brand-title { font-size: 28px; font-weight: 700; margin: 12px 0 4px; }
 .brand-sub { font-size: 14px; opacity: 0.85; margin: 0; }
 .form-card {

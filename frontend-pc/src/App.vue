@@ -5,7 +5,7 @@
     <aside class="sidebar">
       <div class="sidebar-header">
         <img src="/sidebar-logo.png" class="sidebar-logo" />
-        <span class="sidebar-title">小图兔</span>
+        <span class="sidebar-title">看图兔</span>
       </div>
       <nav class="sidebar-menu">
         <div
