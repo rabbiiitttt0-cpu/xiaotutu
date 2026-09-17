@@ -180,6 +180,10 @@ export const projects = {
 }
 
 // ===== 审计日志 =====
+export const auth = {
+  changePassword: (data) => api.put('/auth/password', data),
+}
+
 export const audit = {
   logs: (params) => api.get('/audit/logs', { params }),
   eventTypes: () => api.get('/audit/event-types'),

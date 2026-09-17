@@ -8,6 +8,7 @@
       <span v-else class="top-title">{{ sheets[0]?.filename || '识图助手' }}</span>
       <van-button size="small" type="primary" plain @click="openProjectPicker">项目图纸</van-button>
       <van-button size="small" type="primary" plain @click="showUploader = true">上传图纸</van-button>
+      <van-button size="small" type="primary" plain icon="user-o" @click="showMyMenu = true" />
     </div>
 
     <!-- 图纸预览（触摸缩放拖动） -->
@@ -93,6 +94,47 @@
       </div>
     </van-popup>
 
+    <!-- 「我的」菜单：修改密码 / 退出登录 -->
+    <van-action-sheet
+      v-model:show="showMyMenu"
+      :actions="myMenuActions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="onMyMenuSelect"
+    />
+
+    <!-- 修改密码弹窗 -->
+    <van-popup v-model:show="showPwdPopup" position="bottom" round>
+      <div class="uploader-panel">
+        <h4>修改密码</h4>
+        <van-field
+          v-model="pwdForm.old_password"
+          type="password"
+          label="原密码"
+          placeholder="请输入当前密码"
+        />
+        <van-field
+          v-model="pwdForm.new_password"
+          type="password"
+          label="新密码"
+          placeholder="至少 6 位"
+        />
+        <van-field
+          v-model="pwdForm.confirm_password"
+          type="password"
+          label="确认新密码"
+          placeholder="再次输入新密码"
+        />
+        <van-button
+          type="primary" block round style="margin-top: 12px"
+          :loading="pwdSubmitting" @click="submitChangePassword"
+        >
+          确定修改
+        </van-button>
+      </div>
+    </van-popup>
+
+
     <!-- 项目图纸弹窗（预处理秒开 + 图纸集 + 5天会话） -->
     <van-popup v-model:show="showProjectPicker" position="bottom" round :style="{ maxHeight: '75%' }">
       <div class="uploader-panel">
@@ -166,6 +208,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { showToast, showSuccessToast } from 'vant'
 import { drawing as drawingApi, projects as projectsApi } from '../api'
+import { auth as authApi } from '../api/auth'
 import { useAuthStore } from '../stores/auth'
 
 const authStore = useAuthStore()
@@ -174,6 +217,45 @@ const authStore = useAuthStore()
 const showUploader = ref(false)
 const fileList = ref([])
 const uploading = ref(false)
+
+// 「我的」菜单 + 修改密码
+const showMyMenu = ref(false)
+const showPwdPopup = ref(false)
+const pwdSubmitting = ref(false)
+const pwdForm = ref({ old_password: '', new_password: '', confirm_password: '' })
+const myMenuActions = [
+  { name: '修改密码', key: 'change-pwd' },
+  { name: '退出登录', key: 'logout', color: '#ee0a24' },
+]
+
+function onMyMenuSelect(action) {
+  if (action.key === 'change-pwd') {
+    pwdForm.value = { old_password: '', new_password: '', confirm_password: '' }
+    showPwdPopup.value = true
+  } else if (action.key === 'logout') {
+    localStorage.removeItem('access_token')
+    localStorage.removeItem('refresh_token')
+    localStorage.removeItem('user_info')
+    window.location.href = '/login'
+  }
+}
+
+async function submitChangePassword() {
+  const { old_password, new_password, confirm_password } = pwdForm.value
+  if (!old_password) return showToast('请输入原密码')
+  if (!new_password || new_password.length < 6) return showToast('新密码至少 6 位')
+  if (new_password !== confirm_password) return showToast('两次输入的密码不一致')
+  pwdSubmitting.value = true
+  try {
+    await authApi.changePassword({ old_password, new_password })
+    showSuccessToast('密码修改成功')
+    showPwdPopup.value = false
+  } catch (e) {
+    showToast(e.response?.data?.detail || e.message || '修改失败')
+  } finally {
+    pwdSubmitting.value = false
+  }
+}
 
 // 图纸集
 const setId = ref('')
