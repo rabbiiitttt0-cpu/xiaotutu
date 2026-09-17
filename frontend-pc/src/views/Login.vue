@@ -5,17 +5,17 @@
       <img src="/login-calligraphy.png" alt="" class="login-calligraphy" />
       <div class="brand-content">
         <h1 class="brand-title" @click="openForm('login')">
-          同舟智航施工方案管理系统
+          小图兔 - 图纸识别助手
           <span class="title-tip">点击即可注册及登录试用</span>
         </h1>
-        <el-tooltip content="点击了解中建港航局" placement="bottom" effect="dark" :offset="-15">
+        <el-tooltip content="点击了解小图兔" placement="bottom" effect="dark" :offset="-15">
           <a
             href="https://cschcc.cscec.com/gywm/qyjj/"
             target="_blank"
             rel="noopener"
             class="brand-logo-link"
           >
-            <img src="/logo-white.png" alt="中建港航局" class="brand-logo" />
+            <img src="/logo-white.png" alt="小图兔" class="brand-logo" />
           </a>
         </el-tooltip>
         <div class="brand-carousel">
@@ -45,14 +45,16 @@
       <span class="nav-item" @click="openForm('register')">注册</span>
       <span class="nav-divider"></span>
       <span class="nav-item" @click="openAbout">了解系统</span>
+      <span class="nav-divider"></span>
+      <span class="nav-item" @click="goMobile">📱 手机版</span>
     </div>
 
     <!-- 表单区（点击登录/注册后从右侧滑出，占 35%） -->
     <div class="login-form-side">
       <button class="close-btn" title="关闭" @click="closeForm">×</button>
       <div class="login-header">
-        <img src="/logo.png" alt="中建港航局" class="login-logo" />
-        <h1>同舟智航施工方案管理系统</h1>
+        <img src="/logo.png" alt="小图兔" class="login-logo" />
+        <h1>小图兔 - 图纸识别助手</h1>
       </div>
 
       <el-tabs v-model="activeTab" class="login-tabs">
@@ -156,7 +158,7 @@
       </el-tabs>
 
       <div class="login-footer">
-        <div>© 中建港航局集团有限公司</div>
+        <div>© 小图兔</div>
         <div class="version">v1.0.0</div>
       </div>
     </div>
@@ -177,6 +179,10 @@ const authStore = useAuthStore()
 // 表单区折叠/展开
 const showForm = ref(false)
 
+function goMobile() {
+  window.location.href = '/m/'
+}
+
 function openForm(tab) {
   activeTab.value = tab
   showForm.value = true
@@ -192,13 +198,13 @@ function openAbout() {
 
 // 品牌区轮播：企业简介与文化
 const carouselItems = [
-  { title: '奋楫争先 · 同舟共赢', desc: '中建港航局同舟文化' },
+  { title: '看图识图 · 又快又准', desc: '小图兔识图助手' },
   { title: '科技创新 · 技术先行', desc: '洋山精神' },
   { title: '同舟共智 · 智慧相通', desc: '港航智慧依托 AI 跨越时间相通' },
   { title: '集中智慧 · 攻坚克难', desc: '洋山港时期老港航人精神' },
   { title: '数字化 · 资产化', desc: '港航智慧不再封存于文件袋' },
   { title: '共享真智能 · 随时可用', desc: '所有港航人共享随时可用的真智能' },
-  { title: '拥抱 AI · 奋楫争先', desc: '主动拥抱 AI 新时代的开拓意志' },
+  { title: '拥抱 AI · 智能识图', desc: '主动拥抱 AI 新时代的开拓意志' },
 ]
 const carouselIndex = ref(0)
 let carouselTimer = null
