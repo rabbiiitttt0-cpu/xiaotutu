@@ -55,6 +55,7 @@ const menus = computed(() => [
   { path: '/drawing-review', label: '识图助手', icon: 'Crop' },
   ...(authStore.isSuperAdmin
     ? [
+        { path: '/admin/projects', label: '项目管理', icon: 'FolderOpened' },
         { path: '/admin/users', label: '用户管理', icon: 'UserFilled' },
         { path: '/admin/audit-logs', label: '日志查询', icon: 'Document' },
       ]

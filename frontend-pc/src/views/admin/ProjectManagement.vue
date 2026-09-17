@@ -1,0 +1,326 @@
+<template>
+  <div>
+    <div class="page-header"><h2>项目管理</h2></div>
+
+    <el-card shadow="never">
+      <div style="margin-bottom: 12px; display: flex; justify-content: space-between">
+        <span style="color: #909399; font-size: 13px">
+          项目图纸预处理：上传压缩包后后台自动转换/解析/脱敏，成员问答时秒开
+        </span>
+        <el-button type="primary" @click="openCreate">新建项目</el-button>
+      </div>
+
+      <el-table :data="projectList" stripe border v-loading="loading">
+        <el-table-column prop="name" label="项目名" min-width="160" />
+        <el-table-column prop="description" label="备注" min-width="160" show-overflow-tooltip />
+        <el-table-column label="图纸" width="120">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.drawing_ready === row.drawing_total ? 'success' : 'warning'">
+              {{ row.drawing_ready }}/{{ row.drawing_total }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="member_count" label="成员" width="70" />
+        <el-table-column prop="created_at" label="创建时间" width="160" />
+        <el-table-column label="操作" width="260" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" type="primary" plain @click="openDetail(row)">管理</el-button>
+            <el-button size="small" plain @click="openEdit(row)">编辑</el-button>
+            <el-popconfirm title="删除项目将清除全部图纸与会话，确定？" width="240" @confirm="removeProject(row)">
+              <template #reference>
+                <el-button size="small" type="danger" plain>删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <!-- 新建/编辑项目 -->
+    <el-dialog v-model="formVisible" :title="form.id ? '编辑项目' : '新建项目'" width="440px">
+      <el-form label-width="70px">
+        <el-form-item label="项目名" required>
+          <el-input v-model="form.name" maxlength="100" placeholder="如：XX码头一期工程" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="form.description" type="textarea" :rows="2" maxlength="500" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="formVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="saveProject">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 项目详情抽屉：图纸 + 成员 -->
+    <el-drawer v-model="detailVisible" :title="current?.name" size="720px" destroy-on-close>
+      <el-tabs v-model="detailTab">
+        <!-- ===== 图纸 ===== -->
+        <el-tab-pane label="图纸管理" name="drawings">
+          <div style="display: flex; gap: 10px; margin-bottom: 12px; align-items: center">
+            <el-upload
+              :show-file-list="false" accept=".zip" :auto-upload="false"
+              :on-change="onZipPicked" :disabled="zipUploading"
+            >
+              <el-button type="primary" :loading="zipUploading">
+                {{ zipUploading ? '上传中...' : '上传图纸压缩包(.zip)' }}
+              </el-button>
+            </el-upload>
+            <span style="font-size: 12px; color: #909399">
+              支持 .dwg/.dxf/.pdf 混合打包；上传后后台串行预处理，可离开本页稍后查看
+            </span>
+          </div>
+
+          <el-table :data="drawings" stripe border size="small" v-loading="drawingsLoading">
+            <el-table-column prop="filename" label="文件名" min-width="180" show-overflow-tooltip />
+            <el-table-column label="类型" width="60">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.file_type === 'pdf' ? 'warning' : 'success'">
+                  {{ row.file_type.toUpperCase() }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="近期常用" width="80">
+              <template #default="{ row }">
+                <el-switch
+                  :model-value="row.is_frequent" :disabled="row.status !== 'ready'"
+                  @change="(v) => toggleFrequent(row, v)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="失败原因" min-width="140">
+              <template #default="{ row }">
+                <span v-if="row.error" style="color: #f56c6c; font-size: 12px">{{ row.error }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="70">
+              <template #default="{ row }">
+                <el-popconfirm title="删除该图纸及预处理产物？" width="200" @confirm="removeDrawing(row)">
+                  <template #reference>
+                    <el-button size="small" type="danger" text>删除</el-button>
+                  </template>
+                </el-popconfirm>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!drawings.length && !drawingsLoading" description="尚未上传图纸" :image-size="60" />
+        </el-tab-pane>
+
+        <!-- ===== 成员 ===== -->
+        <el-tab-pane label="项目成员" name="members">
+          <div style="display: flex; gap: 10px; margin-bottom: 12px">
+            <el-select v-model="memberToAdd" filterable placeholder="选择用户加入项目" style="flex: 1">
+              <el-option
+                v-for="u in addableUsers" :key="u.id" :value="u.id"
+                :label="`${u.display_name || u.username}（${u.username}）`"
+              />
+            </el-select>
+            <el-button type="primary" :disabled="!memberToAdd" @click="addMember">添加</el-button>
+          </div>
+          <el-table :data="members" stripe border size="small">
+            <el-table-column prop="username" label="用户名" width="140" />
+            <el-table-column prop="display_name" label="姓名" min-width="120" />
+            <el-table-column prop="joined_at" label="加入时间" width="160" />
+            <el-table-column label="操作" width="80">
+              <template #default="{ row }">
+                <el-popconfirm title="移出该项目？" width="180" @confirm="removeMember(row)">
+                  <template #reference>
+                    <el-button size="small" type="danger" text>移除</el-button>
+                  </template>
+                </el-popconfirm>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </el-drawer>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
+import { projects as projectsApi } from '../../api'
+import { adminUsers } from '../../api/auth'
+
+const loading = ref(false)
+const projectList = ref([])
+
+async function loadProjects() {
+  loading.value = true
+  try {
+    const { data } = await projectsApi.list()
+    projectList.value = data
+  } finally {
+    loading.value = false
+  }
+}
+
+// ===== 新建/编辑 =====
+const formVisible = ref(false)
+const saving = ref(false)
+const form = ref({ id: 0, name: '', description: '' })
+
+function openCreate() {
+  form.value = { id: 0, name: '', description: '' }
+  formVisible.value = true
+}
+function openEdit(row) {
+  form.value = { id: row.id, name: row.name, description: row.description }
+  formVisible.value = true
+}
+async function saveProject() {
+  if (!form.value.name.trim()) { ElMessage.warning('请填写项目名'); return }
+  saving.value = true
+  try {
+    if (form.value.id) await projectsApi.update(form.value.id, form.value)
+    else await projectsApi.create(form.value)
+    ElMessage.success('已保存')
+    formVisible.value = false
+    loadProjects()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    saving.value = false
+  }
+}
+async function removeProject(row) {
+  try {
+    await projectsApi.remove(row.id)
+    ElMessage.success('已删除')
+    loadProjects()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+// ===== 详情抽屉 =====
+const detailVisible = ref(false)
+const detailTab = ref('drawings')
+const current = ref(null)
+
+function openDetail(row) {
+  current.value = row
+  detailTab.value = 'drawings'
+  detailVisible.value = true
+  loadDrawings()
+  loadMembers()
+  loadAllUsers()
+}
+
+// ----- 图纸 -----
+const drawings = ref([])
+const drawingsLoading = ref(false)
+const zipUploading = ref(false)
+let pollTimer = null
+
+function statusType(s) {
+  return { ready: 'success', processing: 'warning', pending: 'info', failed: 'danger' }[s] || 'info'
+}
+function statusText(s) {
+  return { ready: '就绪', processing: '处理中', pending: '排队中', failed: '失败' }[s] || s
+}
+
+async function loadDrawings() {
+  if (!current.value) return
+  drawingsLoading.value = true
+  try {
+    const { data } = await projectsApi.drawings(current.value.id, 'admin')
+    drawings.value = data
+    // 有排队/处理中的图纸时轮询进度（3s）
+    const busy = data.some(d => d.status === 'pending' || d.status === 'processing')
+    clearTimeout(pollTimer)
+    if (busy) pollTimer = setTimeout(loadDrawings, 3000)
+  } finally {
+    drawingsLoading.value = false
+  }
+}
+
+async function onZipPicked(file) {
+  zipUploading.value = true
+  try {
+    const { data } = await projectsApi.uploadZip(current.value.id, file.raw)
+    const skipNote = data.skipped?.length ? `，跳过不支持文件 ${data.skipped.length} 个` : ''
+    ElMessage.success(`已接收 ${data.created.length} 个图纸文件，后台预处理中${skipNote}`)
+    loadDrawings()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    zipUploading.value = false
+  }
+}
+
+async function toggleFrequent(row, v) {
+  try {
+    await projectsApi.patchDrawing(current.value.id, row.id, { is_frequent: v })
+    row.is_frequent = v
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+async function removeDrawing(row) {
+  try {
+    await projectsApi.removeDrawing(current.value.id, row.id)
+    ElMessage.success('已删除')
+    loadDrawings()
+    loadProjects()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+// ----- 成员 -----
+const members = ref([])
+const allUsers = ref([])
+const memberToAdd = ref(null)
+
+async function loadMembers() {
+  const { data } = await projectsApi.members(current.value.id)
+  members.value = data
+}
+async function loadAllUsers() {
+  try {
+    const { data } = await adminUsers.list()
+    allUsers.value = data
+  } catch { /* 静默 */ }
+}
+const addableUsers = computed(() => {
+  const ids = new Set(members.value.map(m => m.user_id))
+  return allUsers.value.filter(u => !ids.has(u.id) && u.is_active !== false)
+})
+async function addMember() {
+  try {
+    await projectsApi.addMember(current.value.id, memberToAdd.value)
+    memberToAdd.value = null
+    ElMessage.success('已添加')
+    loadMembers()
+    loadProjects()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+async function removeMember(row) {
+  try {
+    await projectsApi.removeMember(current.value.id, row.user_id)
+    ElMessage.success('已移除')
+    loadMembers()
+    loadProjects()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+onMounted(loadProjects)
+onBeforeUnmount(() => clearTimeout(pollTimer))
+</script>
+
+<style scoped>
+.page-header { margin-bottom: 16px; }
+.page-header h2 { margin: 0; font-size: 20px; }
+</style>

@@ -144,6 +144,39 @@ export const drawing = {
   getSet: (id) => api.get(`/drawing/sets/${id}`),
   removeSheet: (setId, fileId) => api.delete(`/drawing/sets/${setId}/sheets/${fileId}`),
   saveSetSummary: (id, data) => api.put(`/drawing/sets/${id}/summary`, data),
+  projectSet: (data) => api.post('/drawing/project_set', data),
+}
+
+// ===== 项目图纸管理 =====
+export const projects = {
+  // 超管
+  list: () => api.get('/projects'),
+  create: (data) => api.post('/projects', data),
+  update: (id, data) => api.put(`/projects/${id}`, data),
+  remove: (id) => api.delete(`/projects/${id}`),
+  members: (id) => api.get(`/projects/${id}/members`),
+  addMember: (id, userId) => api.post(`/projects/${id}/members`, { user_id: userId }),
+  removeMember: (id, userId) => api.delete(`/projects/${id}/members/${userId}`),
+  uploadZip: (id, file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post(`/projects/${id}/drawings/zip`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,  // 大压缩包上传放宽到 5 分钟
+    })
+  },
+  patchDrawing: (id, did, data) => api.patch(`/projects/${id}/drawings/${did}`, data),
+  removeDrawing: (id, did) => api.delete(`/projects/${id}/drawings/${did}`),
+  // 成员
+  mine: () => api.get('/projects/mine'),
+  drawings: (id, scope = 'frequent') => api.get(`/projects/${id}/drawings`, { params: { scope } }),
+  drawingInfo: (id, did) => api.get(`/projects/${id}/drawings/${did}/info`),
+  sets: (id) => api.get(`/projects/${id}/sets`),
+  createSet: (id, data) => api.post(`/projects/${id}/sets`, data),
+  removeSet: (id, sid) => api.delete(`/projects/${id}/sets/${sid}`),
+  sessions: (id) => api.get(`/projects/${id}/sessions`),
+  getSession: (id, sid) => api.get(`/projects/${id}/sessions/${sid}`),
+  removeSession: (id, sid) => api.delete(`/projects/${id}/sessions/${sid}`),
 }
 
 // ===== 审计日志 =====

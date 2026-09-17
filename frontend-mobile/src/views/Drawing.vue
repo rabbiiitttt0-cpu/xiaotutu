@@ -6,6 +6,7 @@
         <van-dropdown-item :model-value="activeSheetId" :options="sheetOptions" @change="onSheetChange" />
       </van-dropdown-menu>
       <span v-else class="top-title">{{ sheets[0]?.filename || '识图助手' }}</span>
+      <van-button size="small" type="primary" plain @click="openProjectPicker">项目图纸</van-button>
       <van-button size="small" type="primary" plain @click="showUploader = true">上传图纸</van-button>
     </div>
 
@@ -91,13 +92,80 @@
         </van-button>
       </div>
     </van-popup>
+
+    <!-- 项目图纸弹窗（预处理秒开 + 图纸集 + 5天会话） -->
+    <van-popup v-model:show="showProjectPicker" position="bottom" round :style="{ maxHeight: '75%' }">
+      <div class="uploader-panel">
+        <h4>项目图纸</h4>
+        <van-dropdown-menu v-if="myProjects.length">
+          <van-dropdown-item
+            :model-value="activeProjectId" :options="projectOptions"
+            @change="onProjectChange"
+          />
+        </van-dropdown-menu>
+        <van-empty v-else description="您还未加入任何项目，请联系管理员" image-size="60" />
+
+        <template v-if="activeProjectId">
+          <!-- 5天内会话 -->
+          <template v-if="projSessions.length">
+            <p class="uploader-tip" style="margin-bottom: 4px">最近会话（5天内，含上下文）</p>
+            <div
+              v-for="s in projSessions" :key="s.id" class="file-item"
+              @click="restoreSession(s)"
+            >
+              <span>{{ s.title || '未命名会话' }} · {{ s.message_count }}条</span>
+              <span style="color: #c8c9cc; font-size: 12px">至{{ s.expires_at.slice(5, 10) }}</span>
+            </div>
+          </template>
+
+          <!-- 图纸集 -->
+          <template v-if="projSets.length">
+            <p class="uploader-tip" style="margin-bottom: 4px">图纸集</p>
+            <div
+              v-for="s in projSets" :key="s.id" class="file-item"
+              @click="selectedDrawingIds = [...s.drawing_ids]; applyProjectDrawings()"
+            >
+              <span>📁 {{ s.name }}</span>
+              <span style="color: #c8c9cc; font-size: 12px">{{ s.drawing_ids.length }}张</span>
+            </div>
+          </template>
+
+          <!-- 图纸多选（常用置顶，可切全部） -->
+          <div style="display: flex; justify-content: space-between; align-items: center">
+            <p class="uploader-tip" style="margin: 4px 0">图纸（{{ showAll ? '全部' : '近期常用' }}）</p>
+            <van-switch :model-value="showAll" size="20px" @update:model-value="showAll = $event; loadProjDrawings()" />
+          </div>
+          <van-checkbox-group v-model="selectedDrawingIds" style="max-height: 180px; overflow-y: auto">
+            <van-checkbox
+              v-for="d in projDrawings" :key="d.id" :name="d.id"
+              style="padding: 6px 4px"
+            >
+              {{ d.filename }}
+              <van-tag v-if="d.is_frequent" type="warning" size="medium">常用</van-tag>
+            </van-checkbox>
+            <van-empty
+              v-if="!projDrawings.length" image-size="40"
+              :description="showAll ? '项目暂无已处理图纸' : '暂无常用图纸，打开开关看全部'"
+            />
+          </van-checkbox-group>
+
+          <van-button
+            type="primary" block round style="margin-top: 12px"
+            :disabled="!selectedDrawingIds.length" :loading="projApplying"
+            @click="applyProjectDrawings"
+          >
+            开始问答（已选 {{ selectedDrawingIds.length }} 张）
+          </van-button>
+        </template>
+      </div>
+    </van-popup>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { showToast, showSuccessToast } from 'vant'
-import { drawing as drawingApi } from '../api'
+import { drawing as drawingApi, projects as projectsApi } from '../api'
 import { useAuthStore } from '../stores/auth'
 
 const authStore = useAuthStore()
@@ -147,6 +215,8 @@ function onFileRead(file) {
 async function doUpload() {
   if (!fileList.value.length) { showToast('请先选择图纸'); return }
   uploading.value = true
+  activeProjectId.value = 0  // 本地上传：退出项目图纸模式
+  projSessionId.value = 0
   try {
     const results = await Promise.allSettled(fileList.value.map(f => drawingApi.upload(f)))
     const fileIds = []
@@ -194,13 +264,118 @@ async function selectSheet(fid) {
 }
 
 function aiPayload(extra) {
-  return setId.value ? { set_id: setId.value, ...extra } : { file_id: activeSheetId.value, ...extra }
+  const base = setId.value ? { set_id: setId.value } : { file_id: activeSheetId.value }
+  // 项目图纸模式：带 project_id/session_id（脱敏 + 5天会话上下文）
+  if (activeProjectId.value) {
+    base.project_id = activeProjectId.value
+    base.session_id = projSessionId.value || 0
+    base.drawing_ids = selectedDrawingIds.value
+  }
+  return { ...base, ...extra }
+}
+
+// ===== 项目图纸模式 =====
+const showProjectPicker = ref(false)
+const myProjects = ref([])
+const activeProjectId = ref(0)
+const projDrawings = ref([])
+const projSets = ref([])
+const projSessions = ref([])
+const selectedDrawingIds = ref([])
+const showAll = ref(false)
+const projApplying = ref(false)
+const projSessionId = ref(0)
+
+const projectOptions = computed(() => myProjects.value.map(p => ({ text: p.name, value: p.id })))
+
+async function openProjectPicker() {
+  showProjectPicker.value = true
+  try {
+    const { data } = await projectsApi.mine()
+    myProjects.value = data
+    if (data.length && !activeProjectId.value) activeProjectId.value = data[0].id
+    if (activeProjectId.value) loadProjDrawings()
+  } catch { /* 静默 */ }
+}
+
+function onProjectChange(pid) {
+  activeProjectId.value = pid
+  selectedDrawingIds.value = []
+  projSessionId.value = 0
+  loadProjDrawings()
+}
+
+async function loadProjDrawings() {
+  if (!activeProjectId.value) return
+  try {
+    const scope = showAll.value ? 'all' : 'frequent'
+    const [d, s, sess] = await Promise.all([
+      projectsApi.drawings(activeProjectId.value, scope),
+      projectsApi.sets(activeProjectId.value),
+      projectsApi.sessions(activeProjectId.value),
+    ])
+    projDrawings.value = d.data
+    projSets.value = s.data
+    projSessions.value = sess.data
+    // 常用为空时自动切全部
+    if (!showAll.value && !d.data.length) {
+      const { data: all } = await projectsApi.drawings(activeProjectId.value, 'all')
+      if (all.length) { showAll.value = true; projDrawings.value = all }
+    }
+  } catch { /* 静默 */ }
+}
+
+async function applyProjectDrawings() {
+  if (!selectedDrawingIds.value.length) return
+  projApplying.value = true
+  try {
+    messages.value = []
+    projSessionId.value = 0
+    const { data } = await drawingApi.projectSet({
+      project_id: activeProjectId.value,
+      drawing_ids: selectedDrawingIds.value,
+    })
+    setId.value = data.set_id
+    sheets.value = data.sheets
+    activeSheetId.value = sheets.value[0]?.file_id
+    await selectSheet(activeSheetId.value)
+    showProjectPicker.value = false
+    showSuccessToast(`图纸已就绪（${sheets.value.length} 张）`)
+    await autoSummarize()
+  } catch (e) {
+    showToast(e.response?.data?.detail || e.message)
+  } finally {
+    projApplying.value = false
+  }
+}
+
+// 恢复 5 天内的项目会话（图纸选择 + 对话上下文）
+async function restoreSession(s) {
+  try {
+    const { data } = await projectsApi.getSession(activeProjectId.value, s.id)
+    selectedDrawingIds.value = data.drawing_ids || []
+    const { data: pset } = await drawingApi.projectSet({
+      project_id: activeProjectId.value,
+      drawing_ids: data.drawing_ids,
+    })
+    setId.value = pset.set_id
+    sheets.value = pset.sheets
+    activeSheetId.value = sheets.value[0]?.file_id
+    await selectSheet(activeSheetId.value)
+    projSessionId.value = data.id
+    messages.value = data.messages || []
+    showProjectPicker.value = false
+    showSuccessToast(`已恢复会话（保留至 ${data.expires_at.slice(0, 10)}）`)
+  } catch (e) {
+    showToast(e.response?.data?.detail || '恢复会话失败')
+  }
 }
 
 async function autoSummarize() {
   chatLoading.value = true
   try {
     const { data } = await drawingApi.chat(aiPayload({ question: '请综观这套图纸，简要概括图纸内容和各图幅关系' }))
+    if (data.session_id) projSessionId.value = data.session_id
     messages.value.push({ role: 'assistant', content: data.answer, referenced: data.referenced })
   } catch { /* 静默 */ } finally {
     chatLoading.value = false
@@ -215,6 +390,7 @@ async function sendQuestion() {
   chatLoading.value = true
   try {
     const { data } = await drawingApi.chat(aiPayload({ question: q }))
+    if (data.session_id) projSessionId.value = data.session_id
     messages.value.push({ role: 'assistant', content: data.answer, referenced: data.referenced })
   } catch (e) {
     messages.value.push({ role: 'assistant', content: '回答失败: ' + (e.response?.data?.detail || e.message) })

@@ -144,6 +144,17 @@ export const drawing = {
   getSet: (id) => api.get(`/drawing/sets/${id}`),
   removeSheet: (setId, fileId) => api.delete(`/drawing/sets/${setId}/sheets/${fileId}`),
   saveSetSummary: (id, data) => api.put(`/drawing/sets/${id}/summary`, data),
+  projectSet: (data) => api.post('/drawing/project_set', data),
+}
+
+// ===== 项目图纸（成员） =====
+export const projects = {
+  mine: () => api.get('/projects/mine'),
+  drawings: (id, scope = 'frequent') => api.get(`/projects/${id}/drawings`, { params: { scope } }),
+  drawingInfo: (id, did) => api.get(`/projects/${id}/drawings/${did}/info`),
+  sets: (id) => api.get(`/projects/${id}/sets`),
+  sessions: (id) => api.get(`/projects/${id}/sessions`),
+  getSession: (id, sid) => api.get(`/projects/${id}/sessions/${sid}`),
 }
 
 // ===== 审计日志 =====

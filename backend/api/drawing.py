@@ -732,8 +732,9 @@ def _persist_project_session(req: ChatRequest, user: User,
         db.close()
 
 
-def _restore_result(text: str, info: dict | None = None, set_id: str = "") -> str:
-    """LLM 输出还原：项目集 → 项目对照表；本地上传 → ctx 内对照表；否则原样返回"""
+def _restore_result(text: str, info: dict | None = None, set_id: str = "",
+                    project_id: int = 0) -> str:
+    """LLM 输出还原：项目（集/单图）→ 项目对照表；本地上传 → ctx 内对照表；否则原样返回"""
     cmap = None
     if set_id:
         try:
@@ -743,6 +744,8 @@ def _restore_result(text: str, info: dict | None = None, set_id: str = "") -> st
         pid = srec.get("project_id")
         if pid:
             cmap = load_project_cipher(project_service.project_dir(pid))
+    elif project_id:
+        cmap = load_project_cipher(project_service.project_dir(project_id))
     elif info and info.get("_cipher"):
         cmap = CipherMap(info["_cipher"])
     return restore_text(text, cmap) if cmap else text
@@ -906,6 +909,7 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
 class MaterialRequest(BaseModel):
     file_id: str = ""
     set_id: str = ""
+    project_id: int = 0   # 项目单图模式：输出按项目对照表还原
 
 
 @router.post("/materials")
@@ -988,7 +992,7 @@ async def extract_materials(req: MaterialRequest):
         module="drawing",
     )
     _record_usage("materials", with_image, getattr(llm_service, "last_usage", None))
-    result = _restore_result(result, info=info)
+    result = _restore_result(result, info=info, project_id=req.project_id)
 
     # 解析LLM返回的JSON（裸JSON/```json围栏/带前后散文 三种形态都兼容：
     # 取第一个 [ 到最后一个 ] 之间的切片解析）
@@ -1002,6 +1006,7 @@ class BriefingRequest(BaseModel):
     set_id: str = ""
     project_name: str = ""
     extra_info: str = ""
+    project_id: int = 0   # 项目单图模式：输出按项目对照表还原
 
 
 @router.post("/briefing")
@@ -1110,7 +1115,7 @@ async def generate_briefing(req: BriefingRequest):
         module="drawing",
     )
     _record_usage("briefing", with_image, getattr(llm_service, "last_usage", None))
-    result = _restore_result(result, info=info)
+    result = _restore_result(result, info=info, project_id=req.project_id)
 
     return {"briefing": result, "filename": info["filename"], "with_image": with_image}
 

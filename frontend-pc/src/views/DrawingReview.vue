@@ -19,13 +19,85 @@
       <div style="display: flex; justify-content: flex-start; margin-bottom: 8px">
         <el-popconfirm title="清空全部已上传文件和图纸集？" width="220" @confirm="doClear">
           <template #reference>
-            <el-button size="small" type="danger" plain :disabled="!fileList.length && !sheets.length">
+            <el-button size="small" type="danger" plain :disabled="!fileList.length && !sheets.length && !fileId">
               <el-icon><Delete /></el-icon> 清空已上传
             </el-button>
           </template>
         </el-popconfirm>
       </div>
 
+      <!-- 图纸来源：本地上传（实时解析）| 项目图纸（预处理秒开） -->
+      <el-radio-group v-model="sourceMode" size="small" style="width: 100%; margin-bottom: 10px" @change="onSourceModeChange">
+        <el-radio-button value="upload" style="width: 50%">本地上传</el-radio-button>
+        <el-radio-button value="project" style="width: 50%">项目图纸</el-radio-button>
+      </el-radio-group>
+
+      <!-- ==================== 项目图纸模式 ==================== -->
+      <template v-if="sourceMode === 'project'">
+        <el-select
+          v-model="activeProjectId" placeholder="选择项目" style="width: 100%"
+          @change="onProjectChange"
+        >
+          <el-option v-for="p in myProjects" :key="p.id" :label="p.name" :value="p.id" />
+        </el-select>
+        <el-empty
+          v-if="!myProjects.length" description="您还未加入任何项目，请联系管理员" :image-size="50"
+        />
+
+        <template v-else>
+          <!-- 图纸集（常用置顶：一次问答常用的一组图纸，项目共享） -->
+          <div v-if="projSets.length" style="margin-top: 10px">
+            <el-divider content-position="left">图纸集</el-divider>
+            <el-tag
+              v-for="s in projSets" :key="s.id" type="warning" effect="plain"
+              style="margin: 0 6px 6px 0; cursor: pointer"
+              @click="applySet(s)"
+            >
+              {{ s.name }}（{{ s.drawing_ids.length }} 张）
+            </el-tag>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px">
+            <span style="font-size: 13px; color: #606266">项目图纸</span>
+            <el-switch
+              v-model="showAllDrawings" active-text="全部" inactive-text="常用"
+              inline-prompt @change="loadProjDrawings"
+            />
+          </div>
+          <el-checkbox-group
+            v-model="selectedDrawingIds"
+            style="max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; margin-top: 4px"
+          >
+            <el-checkbox v-for="d in projDrawings" :key="d.id" :value="d.id">
+              <span style="font-size: 13px">{{ d.filename }}</span>
+              <el-tag v-if="d.is_frequent" size="small" type="warning" style="margin-left: 4px">常用</el-tag>
+            </el-checkbox>
+            <el-empty
+              v-if="!projDrawings.length"
+              :description="showAllDrawings ? '项目暂无已处理图纸' : '暂无常用图纸，切到「全部」查看'"
+              :image-size="40"
+            />
+          </el-checkbox-group>
+
+          <div style="display: flex; gap: 8px; margin-top: 10px">
+            <el-button
+              type="primary" style="flex: 1" :loading="projApplying"
+              :disabled="!selectedDrawingIds.length" @click="applyProjectDrawings(true)"
+            >
+              开始问答（已选 {{ selectedDrawingIds.length }} 张）
+            </el-button>
+            <el-button :disabled="selectedDrawingIds.length < 2" @click="saveAsSet">
+              存为图纸集
+            </el-button>
+          </div>
+          <div style="font-size: 12px; color: #909399; margin-top: 6px">
+            预处理图纸无需等待解析；会话（含对话上下文）保留 5 天
+          </div>
+        </template>
+      </template>
+
+      <!-- ==================== 本地上传模式 ==================== -->
+      <template v-else>
       <el-upload
         ref="uploadRef"
         drag
@@ -53,6 +125,7 @@
       >
         {{ uploading ? '解析中...' : pendingCount > 1 ? `解析图纸（新增 ${pendingCount} 张）` : '解析图纸' }}
       </el-button>
+      </template>
 
       <!-- 图纸集面板（一套多图，>3张问答自动路由选图） -->
       <div v-if="sheets.length" style="margin-top: 16px">
@@ -80,17 +153,6 @@
           <el-descriptions-item v-if="drawingInfo.total_entities" label="图层数">{{ drawingInfo.layer_count }}</el-descriptions-item>
           <el-descriptions-item v-if="drawingInfo.total_entities" label="实体总数">{{ drawingInfo.total_entities }}</el-descriptions-item>
         </el-descriptions>
-
-        <!-- 用量统计 -->
-        <template v-if="usageTotal && isSuperAdmin">
-          <el-divider content-position="left">视觉模型用量</el-divider>
-          <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="累计请求">{{ usageTotal.requests }} 次（带图 {{ usageTotal.with_image }} 次）</el-descriptions-item>
-            <el-descriptions-item label="输入 tokens">{{ usageTotal.prompt_tokens.toLocaleString() }}（缓存命中 {{ usageTotal.cache_hit_tokens.toLocaleString() }}）</el-descriptions-item>
-            <el-descriptions-item label="输出 tokens">{{ usageTotal.completion_tokens.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="估算费用">${{ usageTotal.est_cost_usd }}（峰值费率估算，以账单为准）</el-descriptions-item>
-          </el-descriptions>
-        </template>
 
         <!-- DXF 专属区块（PDF 图纸无图层/实体概念，隐藏） -->
         <template v-if="drawingInfo.layers && drawingInfo.layers.length">
@@ -126,15 +188,6 @@
             </div>
           </div>
         </template>
-      </div>
-
-      <!-- 用量统计（无图纸时也显示，便于观察消耗） -->
-      <div v-if="!drawingInfo && usageTotal && isSuperAdmin" style="margin-top: 16px">
-        <el-divider content-position="left">视觉模型用量</el-divider>
-        <el-descriptions :column="1" border size="small">
-          <el-descriptions-item label="累计请求">{{ usageTotal.requests }} 次（带图 {{ usageTotal.with_image }} 次）</el-descriptions-item>
-          <el-descriptions-item label="估算费用">${{ usageTotal.est_cost_usd }}（估算，以账单为准）</el-descriptions-item>
-        </el-descriptions>
       </div>
 
       <!-- 底部功能行：钟表按钮呼出历史会话记录（覆盖右侧主区） -->
@@ -420,11 +473,13 @@
       </div>
       <el-empty v-if="historySessions.length === 0" description="暂无会话记录" :image-size="60" />
       <el-table v-else :data="historySessions" stripe size="small" max-height="calc(100% - 60px)" highlight-current-row @row-click="loadSession">
-        <el-table-column prop="filename" label="图纸文件" min-width="160" show-overflow-tooltip />
-        <el-table-column label="图层" width="70">
+        <el-table-column :label="sourceMode === 'project' ? '会话' : '图纸文件'" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.filename || row.title }}</template>
+        </el-table-column>
+        <el-table-column v-if="sourceMode !== 'project'" label="图层" width="70">
           <template #default="{ row }">{{ row.layer_count }}</template>
         </el-table-column>
-        <el-table-column label="实体" width="70">
+        <el-table-column v-if="sourceMode !== 'project'" label="实体" width="70">
           <template #default="{ row }">{{ row.total_entities }}</template>
         </el-table-column>
         <el-table-column label="对话数" width="80">
@@ -432,12 +487,13 @@
             <el-tag size="small" type="info">{{ row.message_count }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="created_at" label="创建时间" width="170" />
+        <el-table-column prop="created_at" label="创建时间" width="165" />
+        <el-table-column v-if="sourceMode === 'project'" prop="expires_at" label="保留至" width="165" />
         <el-table-column label="操作" width="100">
           <template #default="{ row }">
             <div style="display: flex; gap: 4px; align-items: center">
               <el-button size="small" @click.stop="loadSession(row); historyVisible = false">查看</el-button>
-              <el-popconfirm title="确定删除该会话？" @confirm.stop="deleteSession(row.session_id)">
+              <el-popconfirm title="确定删除该会话？" @confirm.stop="deleteSession(row.session_id || row.id)">
                 <template #reference>
                   <el-button size="small" type="danger" plain @click.stop>删除</el-button>
                 </template>
@@ -456,9 +512,8 @@
 
 <script setup>
 import { ref, computed, nextTick, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { drawing as drawingApi } from '../api'
-import { useAuthStore } from '../stores/auth'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { drawing as drawingApi, projects as projectsApi } from '../api'
 import TutorialOverlay from '../components/TutorialOverlay.vue'
 
 const tutorialRef = ref(null)
@@ -484,8 +539,107 @@ const setId = ref('')
 const sheets = ref([])
 const activeSheetId = ref('')
 
-// 是否有可用图纸上下文（图纸集或单图）
-const hasContext = computed(() => !!setId.value || !!fileId.value)
+// ===== 项目图纸模式（函数） =====
+
+async function loadMyProjects() {
+  try {
+    const { data } = await projectsApi.mine()
+    myProjects.value = data
+    if (data.length && !activeProjectId.value) {
+      activeProjectId.value = data[0].id
+    }
+  } catch { /* 静默 */ }
+}
+
+function onSourceModeChange() {
+  if (sourceMode.value === 'project') {
+    loadMyProjects().then(() => { if (activeProjectId.value) loadProjDrawings() })
+  }
+  loadHistory()
+}
+
+function onProjectChange() {
+  selectedDrawingIds.value = []
+  projSessionId.value = 0
+  loadProjDrawings()
+}
+
+async function loadProjDrawings() {
+  if (!activeProjectId.value) return
+  try {
+    const scope = showAllDrawings.value ? 'all' : 'frequent'
+    const [d, s] = await Promise.all([
+      projectsApi.drawings(activeProjectId.value, scope),
+      projectsApi.sets(activeProjectId.value),
+    ])
+    projDrawings.value = d.data
+    projSets.value = s.data
+    // 常用范围为空时自动切全部（避免误以为没图纸）
+    if (!showAllDrawings.value && !d.data.length) {
+      const { data: all } = await projectsApi.drawings(activeProjectId.value, 'all')
+      if (all.length) {
+        showAllDrawings.value = true
+        projDrawings.value = all
+      }
+    }
+  } catch { /* 静默 */ }
+}
+
+// 应用选中的项目图纸：1 张走单图模式，多张建临时图纸集
+async function applyProjectDrawings(withSummary) {
+  if (!selectedDrawingIds.value.length) return
+  projApplying.value = true
+  try {
+    messages.value = []
+    projSessionId.value = 0
+    if (selectedDrawingIds.value.length === 1) {
+      const did = selectedDrawingIds.value[0]
+      const { data: info } = await projectsApi.drawingInfo(activeProjectId.value, did)
+      fileId.value = info.file_id
+      setId.value = ''
+      sheets.value = []
+      drawingInfo.value = info
+      loadPreview(info.file_id)
+    } else {
+      const { data } = await drawingApi.projectSet({
+        project_id: activeProjectId.value,
+        drawing_ids: selectedDrawingIds.value,
+      })
+      setId.value = data.set_id
+      sheets.value = data.sheets
+      drawingInfo.value = null
+      selectSheet(data.sheets[0].file_id)
+    }
+    ElMessage.success('图纸已就绪（预处理秒开）')
+    if (withSummary) await autoSummarize()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    projApplying.value = false
+  }
+}
+
+// 点击图纸集：整组选中并开始问答
+function applySet(s) {
+  selectedDrawingIds.value = [...s.drawing_ids]
+  applyProjectDrawings(true)
+}
+
+// 存为图纸集（成员可建，项目共享）
+async function saveAsSet() {
+  try {
+    const { value } = await ElMessageBox.prompt('给这组图纸起个名字（如：桩基一套）', '存为图纸集', {
+      confirmButtonText: '保存', cancelButtonText: '取消',
+      inputValidator: (v) => (v && v.trim()) ? true : '名称不能为空',
+    })
+    await projectsApi.createSet(activeProjectId.value, {
+      name: value.trim(), drawing_ids: selectedDrawingIds.value,
+    })
+    ElMessage.success('图纸集已保存，项目成员共享可见')
+    const { data } = await projectsApi.sets(activeProjectId.value)
+    projSets.value = data
+  } catch { /* 用户取消 */ }
+}
 
 // 右侧Tab
 const rightTab = ref('chat')
@@ -776,11 +930,6 @@ function toggleVoice() {
   recognizing.value = true
 }
 
-// 视觉模型用量（仅总管理员可见）
-const auth = useAuthStore()
-const isSuperAdmin = computed(() => auth.isSuperAdmin)
-const usageTotal = ref(null)
-
 function _revokePreviews() {
   previewUrls.value.forEach(u => URL.revokeObjectURL(u))
   previewUrls.value = []
@@ -810,13 +959,7 @@ async function loadPreview(fid) {
   }
 }
 
-async function loadUsage() {
-  if (!isSuperAdmin.value) return
-  try {
-    const { data } = await drawingApi.usage()
-    usageTotal.value = data.total
-  } catch { /* 静默 */ }
-}
+async function loadUsage() {}  // 用量统计已移至「日志查询」页（仅超管）
 
 // ACI颜色映射（简化版）
 const aciColors = [
@@ -871,6 +1014,7 @@ function doClear() {
   fileList.value = []
   uploadRef.value?.clearFiles()
   sessionId.value = ''
+  projSessionId.value = 0
   fileId.value = ''
   setId.value = ''
   sheets.value = []
@@ -886,6 +1030,7 @@ function doClear() {
 // 新建会话
 function newSession() {
   sessionId.value = ''
+  projSessionId.value = 0
   fileId.value = ''
   setId.value = ''
   sheets.value = []
@@ -969,6 +1114,7 @@ async function autoSummarize() {
     : '请根据这张图纸的图层、实体类型和文字标注，简要概括这张图纸的大致内容，包括：1）这可能是什么类型的图纸；2）图中包含哪些主要元素；3）有哪些重要标注信息。提示：文件名通常就是图名，图中右下角图框（标题栏）含项目名称、专业、图名、图号、版本等，请以这些信息为主要依据。用简洁的语言总结。'
   try {
     const { data } = await drawingApi.chat(aiPayload({ question: summaryQuestion }))
+    if (data.session_id) projSessionId.value = data.session_id  // 概述即入项目会话
     messages.value.push({
       role: 'assistant',
       content: data.answer + '\n\n图纸读取完成！关于这套图纸你有什么想问的吗？可以直接向我提问。',
@@ -992,9 +1138,15 @@ async function autoSummarize() {
   }
 }
 
-// AI 请求载荷：图纸集优先，单图兜底
+// AI 请求载荷：图纸集优先，单图兜底；项目模式附带 project_id/session_id（脱敏+5天会话）
 function aiPayload(extra) {
-  return setId.value ? { set_id: setId.value, ...extra } : { file_id: fileId.value, ...extra }
+  const base = setId.value ? { set_id: setId.value } : { file_id: fileId.value }
+  if (sourceMode.value === 'project' && activeProjectId.value) {
+    base.project_id = activeProjectId.value
+    base.session_id = projSessionId.value || 0
+    base.drawing_ids = selectedDrawingIds.value
+  }
+  return { ...base, ...extra }
 }
 
 async function sendQuestion() {
@@ -1012,8 +1164,8 @@ async function sendQuestion() {
     const payload = aiPayload({ question: q, snip_image: snipBlobUrl.value || '' })
     const { data } = await drawingApi.chat(payload)
     messages.value.push({ role: 'assistant', content: data.answer, referenced: data.referenced || [] })
+    if (data.session_id) projSessionId.value = data.session_id  // 项目会话（服务端保留5天）
     snipBlobUrl.value = ''  // 截图随本次问题消费，不残留
-    loadUsage()
   } catch (e) {
     messages.value.push({ role: 'assistant', content: '抱歉，回答失败: ' + (e.response?.data?.detail || e.message) })
   } finally {
@@ -1031,8 +1183,9 @@ function scrollToBottom() {
   }
 }
 
-// 保存当前会话
+// 保存当前会话（项目模式会话由服务端在问答时自动落库，这里只刷新列表）
 async function saveCurrentSession() {
+  if (sourceMode.value === 'project') { loadHistory(); return }
   if (!setId.value && !drawingInfo.value) return
   try {
     const { data } = await drawingApi.saveSession({
@@ -1056,16 +1209,41 @@ async function saveCurrentSession() {
   } catch { /* 静默 */ }
 }
 
-// 加载历史会话列表
+// 加载历史会话列表（项目模式：当前项目下我 5 天内的会话）
 async function loadHistory() {
   try {
-    const { data } = await drawingApi.listSessions()
-    historySessions.value = data
+    if (sourceMode.value === 'project') {
+      if (!activeProjectId.value) { historySessions.value = []; return }
+      const { data } = await projectsApi.sessions(activeProjectId.value)
+      historySessions.value = data
+    } else {
+      const { data } = await drawingApi.listSessions()
+      historySessions.value = data
+    }
   } catch { /* 静默 */ }
 }
 
 // 加载单个会话
 async function loadSession(row) {
+  // 项目会话：恢复所选图纸 + 对话上下文（服务端返回已还原真实名称）
+  if (sourceMode.value === 'project') {
+    try {
+      const { data } = await projectsApi.getSession(activeProjectId.value, row.id)
+      projSessionId.value = data.id
+      selectedDrawingIds.value = data.drawing_ids || []
+      await applyProjectDrawings(false)  // 恢复图纸上下文，不重复自动概述
+      projSessionId.value = data.id      // applyProjectDrawings 会清零，恢复回写
+      messages.value = data.messages || []
+      materials.value = []
+      briefingContent.value = ''
+      ElMessage.success(`已恢复会话「${data.title}」（保留至 ${data.expires_at}）`)
+      await nextTick()
+      scrollToBottom()
+    } catch (e) {
+      ElMessage.error(e.response?.data?.detail || '加载会话失败')
+    }
+    return
+  }
   try {
     const { data } = await drawingApi.getSession(row.session_id)
     sessionId.value = data.session_id
@@ -1106,11 +1284,16 @@ async function loadSession(row) {
 // 删除会话
 async function deleteSession(sid) {
   try {
-    await drawingApi.deleteSession(sid)
-    ElMessage.success('删除成功')
-    if (sessionId.value === sid) {
-      newSession()
+    if (sourceMode.value === 'project') {
+      await projectsApi.removeSession(activeProjectId.value, sid)
+      if (projSessionId.value === sid) projSessionId.value = 0
+    } else {
+      await drawingApi.deleteSession(sid)
+      if (sessionId.value === sid) {
+        newSession()
+      }
     }
+    ElMessage.success('删除成功')
     loadHistory()
   } catch (e) {
     ElMessage.error('删除失败')
@@ -1186,7 +1369,7 @@ function exportBriefing() {
 
 onMounted(() => {
   loadHistory()
-  loadUsage()
+  loadMyProjects()
   setTimeout(() => tutorialRef.value?.show(), 500)
 })
 </script>

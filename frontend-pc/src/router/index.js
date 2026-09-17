@@ -24,6 +24,12 @@ const routes = [
     meta: { title: '用户管理', requiresSuperAdmin: true },
   },
   {
+    path: '/admin/projects',
+    name: 'AdminProjects',
+    component: () => import('../views/admin/ProjectManagement.vue'),
+    meta: { title: '项目管理', requiresSuperAdmin: true },
+  },
+  {
     path: '/admin/audit-logs',
     name: 'AdminAuditLogs',
     component: () => import('../views/admin/AuditLogs.vue'),
