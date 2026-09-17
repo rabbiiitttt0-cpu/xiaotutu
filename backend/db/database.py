@@ -68,7 +68,8 @@ def get_db():
 
 
 def init_db():
-    """建表（用户 + 日志；识图网站无 vector/pg_trgm 扩展）"""
+    """建表（用户 + 日志 + 项目图纸；识图网站无 vector/pg_trgm 扩展）"""
     from .models import audit_log  # noqa: F401
+    from .models import project  # noqa: F401
     from auth import models as auth_models  # noqa: F401
     Base.metadata.create_all(bind=engine)

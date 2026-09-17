@@ -53,6 +53,11 @@ async def lifespan(app: FastAPI):
             print("[auth] 已创建默认管理员账户: admin / admin123")
     finally:
         db.close()
+
+    # 项目图纸预处理 worker（重启恢复+串行队列）+ 过期会话清理（每 6h）
+    from services import project_service
+    project_service.start_worker()
+    project_service.start_session_cleaner()
     yield
 
 
@@ -86,12 +91,14 @@ from auth.deps import get_current_user, require_super_admin
 from api.drawing import router as drawing_router
 from api.audit_logs import router as audit_router
 from api.system_status import router as status_router
+from api.projects import router as projects_router
 
 app.include_router(auth_router)  # /api/auth/*
 app.include_router(drawing_router, prefix="/api/drawing", tags=["看图助手"],
                    dependencies=[Depends(get_current_user)])
 app.include_router(audit_router, prefix="/api/audit", tags=["日志查询"],
                    dependencies=[Depends(require_super_admin)])
+app.include_router(projects_router, prefix="/api/projects", tags=["项目图纸管理"])
 app.include_router(status_router, dependencies=[Depends(get_current_user)])  # /api/system/*
 
 

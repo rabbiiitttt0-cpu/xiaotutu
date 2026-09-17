@@ -22,6 +22,11 @@ from services.llm_service import LLMService
 from config import load_config
 from auth.deps import require_super_admin, get_current_user
 from auth.models import User
+from services import project_service
+from services.mask_service import (
+    CipherMap, mask_info, mask_text, restore_text,
+    load_project_cipher, mask_and_persist,
+)
 
 router = APIRouter()
 
@@ -202,8 +207,18 @@ async def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_curr
     if converter_note:
         info["converter"] = converter_note
 
+    # 脱敏：文字层敏感信息（单位/人名）→ 密文落盘，对照表存 ctx 内部字段（仅服务端用）。
+    # 返回给前端的 info 仍是原文（用户有权看到真实内容，脱敏只针对 LLM 通道）
+    cmap = CipherMap()
+    masked = mask_info(info, cmap)
+    masked["_cipher"] = cmap.to_dict()
+    masked["has_image"] = info.get("has_image", False)
+    masked["image_count"] = info.get("image_count", 0)
+    if info.get("tiled"):
+        masked["tiled"] = True
+
     # 上下文落盘（多 worker / 重启不丢）
-    _save_context(file_id, info)
+    _save_context(file_id, masked)
 
     from services.audit_log import audit_event
     audit_event("drawing_upload", user_id=user.id, username=user.username,
@@ -444,6 +459,66 @@ async def remove_sheet(set_id: str, file_id: str):
     return rec
 
 
+class ProjectSetRequest(BaseModel):
+    project_id: int
+    drawing_ids: list[int]
+
+
+@router.post("/project_set")
+async def create_project_set(req: ProjectSetRequest, user: User = Depends(get_current_user)):
+    """项目图纸 → 临时图纸集（脱敏目录卡落盘，带 project_id 供输出还原）。
+    多图问答/材料/交底复用既有 set 流程；set 记录含 drawing_ids 供会话回写。"""
+    from db.database import SessionLocal
+    from db.models.project import ProjectMember, ProjectDrawing
+
+    if not req.drawing_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一张图纸")
+    db = SessionLocal()
+    try:
+        if not user.is_super_admin:
+            m = db.query(ProjectMember).filter_by(
+                project_id=req.project_id, user_id=user.id).first()
+            if not m:
+                raise HTTPException(status_code=403, detail="您不是该项目成员")
+        drawings = db.query(ProjectDrawing).filter(
+            ProjectDrawing.id.in_(req.drawing_ids),
+            ProjectDrawing.project_id == req.project_id).all()
+    finally:
+        db.close()
+    by_id = {d.id: d for d in drawings}
+    missing = [i for i in req.drawing_ids if i not in by_id]
+    if missing:
+        raise HTTPException(status_code=400, detail="部分图纸不存在于该项目")
+    not_ready = [d.filename for d in drawings if d.status != "ready"]
+    if not_ready:
+        raise HTTPException(status_code=400, detail=f"图纸未处理完成：{'、'.join(not_ready)}")
+
+    sheets = []
+    for did in req.drawing_ids:
+        d = by_id[did]
+        info = _load_context(d.cache_file_id)  # 脱敏态上下文
+        card = _sheet_card(info)
+        card["file_id"] = d.cache_file_id
+        sheets.append(card)
+
+    set_id = f"pset_{uuid.uuid4().hex[:8]}"
+    rec = {
+        "set_id": set_id, "name": "", "sheets": sheets,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "project_id": req.project_id, "drawing_ids": req.drawing_ids,
+    }
+    path = UPLOAD_DIR / f"{set_id}.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+    return {
+        "set_id": set_id,
+        "sheets": [{"file_id": s["file_id"], "filename": s["filename"],
+                    "doc_type": s["doc_type"], "image_count": s["image_count"]}
+                   for s in sheets],
+    }
+
+
 async def _route_sheets(sheets: list[dict], question: str, llm_service: "LLMService",
                         provider_index: int) -> tuple[list[dict], str]:
     """图幅级路由：目录卡（纯文本）给模型选 1~4 张相关图幅，返回(选中图幅, 理由)。
@@ -509,7 +584,7 @@ def _set_text_context(selected: list[dict]) -> str:
 
 async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
                         prompt_builder, temperature: float, max_tokens: int,
-                        snip_image: str = ""):
+                        snip_image: str = "", history: list | None = None):
     """图纸集 LLM 调用公共流程：路由(>3张)→文本上下文+图→调用→记用量。
     prompt_builder(kind_cn, names, ctx) -> system_prompt"""
     srec = _load_set(req_set_id)
@@ -542,8 +617,9 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
         user_content = _prepend_snip(user_content, snip_image)
         with_image = True
     result = await llm_service.chat_complete(
-        messages=[{"role": "system", "content": system_prompt},
-                  {"role": "user", "content": user_content}],
+        messages=[{"role": "system", "content": system_prompt}]
+                 + _history_msgs(history or [])
+                 + [{"role": "user", "content": user_content}],
         provider_index=pidx, temperature=temperature, max_tokens=max_tokens, module="drawing")
     _record_usage(endpoint, with_image, getattr(llm_service, "last_usage", None))
     referenced = [{"file_id": s["file_id"], "filename": s["filename"]} for s in selected]
@@ -580,6 +656,102 @@ class ChatRequest(BaseModel):
     set_id: str = ""
     question: str
     snip_image: str = ""   # 框选截图（dataURL base64）：用户在预览窗框选局部后针对该区域提问
+    project_id: int = 0    # 项目图纸模式：项目对照表脱敏 + 会话上下文
+    session_id: int = 0    # 项目会话 id（0=新会话，首次问答后返回）
+    drawing_ids: list[int] = []  # 会话记录用：本项目选用的图纸
+
+
+# ==================== 项目图纸模式：会话/脱敏 helpers ====================
+
+def _project_chat_ctx(req: ChatRequest, user: User):
+    """项目模式前置：成员校验 + 会话历史（脱敏态原文）加载。返回 (pdir, history)"""
+    from db.database import SessionLocal
+    from db.models.project import ProjectMember, ProjectSession
+
+    db = SessionLocal()
+    try:
+        if not user.is_super_admin:
+            m = db.query(ProjectMember).filter_by(
+                project_id=req.project_id, user_id=user.id).first()
+            if not m:
+                raise HTTPException(status_code=403, detail="您不是该项目成员")
+        history = []
+        if req.session_id:
+            s = db.query(ProjectSession).filter_by(
+                id=req.session_id, project_id=req.project_id).first()
+            if not s or (s.user_id != user.id and not user.is_super_admin):
+                raise HTTPException(status_code=404, detail="会话不存在")
+            if s.expires_at < datetime.now():
+                raise HTTPException(status_code=404, detail="会话已过期清除，请新建会话")
+            try:
+                history = json.loads(s.messages or "[]")[-10:]  # 上下文窗口：最近 10 条
+            except Exception:
+                history = []
+    finally:
+        db.close()
+    return project_service.project_dir(req.project_id), history
+
+
+def _persist_project_session(req: ChatRequest, user: User,
+                             question_masked: str, answer_masked: str,
+                             drawing_ids: list[int]) -> int:
+    """问答落会话（脱敏态存储，展示时还原）+ 刷新 5 天有效期。返回 session_id"""
+    from db.database import SessionLocal
+    from db.models.project import ProjectSession
+
+    db = SessionLocal()
+    try:
+        s = None
+        if req.session_id:
+            s = db.query(ProjectSession).filter_by(
+                id=req.session_id, project_id=req.project_id).first()
+        if not s:
+            s = ProjectSession(
+                project_id=req.project_id, user_id=user.id,
+                title=req.question[:30],
+                drawing_ids=json.dumps(drawing_ids),
+                messages="[]",
+                expires_at=project_service.session_expiry(),
+            )
+            db.add(s)
+        try:
+            msgs = json.loads(s.messages or "[]")
+        except Exception:
+            msgs = []
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msgs.append({"role": "user", "content": question_masked, "ts": now})
+        msgs.append({"role": "assistant", "content": answer_masked, "ts": now})
+        s.messages = json.dumps(msgs, ensure_ascii=False)
+        if drawing_ids:
+            s.drawing_ids = json.dumps(drawing_ids)
+        s.expires_at = project_service.session_expiry()
+        db.commit()
+        db.refresh(s)
+        return s.id
+    finally:
+        db.close()
+
+
+def _restore_result(text: str, info: dict | None = None, set_id: str = "") -> str:
+    """LLM 输出还原：项目集 → 项目对照表；本地上传 → ctx 内对照表；否则原样返回"""
+    cmap = None
+    if set_id:
+        try:
+            srec = _load_set(set_id)
+        except HTTPException:
+            return text
+        pid = srec.get("project_id")
+        if pid:
+            cmap = load_project_cipher(project_service.project_dir(pid))
+    elif info and info.get("_cipher"):
+        cmap = CipherMap(info["_cipher"])
+    return restore_text(text, cmap) if cmap else text
+
+
+def _history_msgs(history: list) -> list:
+    """会话历史（脱敏态）→ LLM messages 片段（纯文本）"""
+    return [{"role": h.get("role", "user"), "content": h.get("content", "")}
+            for h in history if h.get("content")]
 
 
 def _prepend_snip(content: object, snip_data_url: str) -> object:
@@ -596,9 +768,22 @@ def _prepend_snip(content: object, snip_data_url: str) -> object:
 
 
 @router.post("/chat")
-async def drawing_chat(req: ChatRequest):
-    """图纸问答：单图(file_id)或图纸集(set_id，>3张自动图幅路由)"""
+async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user)):
+    """图纸问答：单图(file_id)或图纸集(set_id，>3张自动图幅路由)；
+    项目图纸模式（project_id）额外做脱敏/还原 + 5 天会话上下文"""
     if req.set_id:
+        # 项目图纸集：集记录里带 project_id → 走脱敏/会话流程
+        try:
+            srec = _load_set(req.set_id)
+        except HTTPException:
+            srec = {}
+        project_id = req.project_id or srec.get("project_id") or 0
+        pdir, history, question_masked = None, [], req.question
+        if project_id:
+            req.project_id = project_id
+            pdir, history = _project_chat_ctx(req, user)
+            question_masked = mask_and_persist(req.question, pdir)
+
         def build_prompt(total, names, ctx, has_img):
             vision_note = ("\n\n附：本消息按上述图幅顺序附带它们的渲染图像，请结合图像与文本信息一起回答。"
                            if has_img else "")
@@ -619,15 +804,36 @@ async def drawing_chat(req: ChatRequest):
 - 如果所选图幅不足以回答问题，说明还需要哪张图{vision_note}
 - 使用专业但易懂的工程术语，中文回答"""
         result, with_image, referenced, route_reason = await _set_llm_call(
-            req.set_id, req.question, "chat", build_prompt, 0.5, 16384,
-            snip_image=req.snip_image)
-        return {"answer": result, "with_image": with_image,
-                "referenced": referenced, "route_reason": route_reason}
+            req.set_id, question_masked, "chat", build_prompt, 0.5, 16384,
+            snip_image=req.snip_image, history=history)
+        answer = result
+        new_session_id = 0
+        if project_id:
+            cmap = load_project_cipher(pdir)
+            answer = restore_text(result, cmap)
+            new_session_id = _persist_project_session(
+                req, user, question_masked, result, req.drawing_ids)
+        return {"answer": answer, "with_image": with_image,
+                "referenced": referenced, "route_reason": route_reason,
+                "session_id": new_session_id}
 
     # ===== 单图模式（原有逻辑） =====
     info = _load_context(req.file_id)
     config = load_config()
     llm_service = LLMService()
+
+    # 脱敏：项目模式用项目对照表；本地上传用 ctx 内对照表
+    pdir, history, cmap = None, [], None
+    if req.project_id:
+        pdir, history = _project_chat_ctx(req, user)
+        question_masked = mask_and_persist(req.question, pdir)
+    elif info.get("_cipher"):
+        cmap = CipherMap(info["_cipher"])
+        question_masked = mask_text(req.question, cmap)
+        info["_cipher"] = cmap.to_dict()
+        _save_context(req.file_id, info)  # 用户提问可能引入新实体，回写对照表
+    else:
+        question_masked = req.question
 
     has_image = _png_path(req.file_id).exists()
     vision_note = _vision_note(
@@ -656,7 +862,7 @@ async def drawing_chat(req: ChatRequest):
 - 中文回答"""
 
     # 第3招：按问题从全量标注中检索补充（去重注入之外的遗漏标注在此兜底）
-    hits = _search_annotations(info, req.question)
+    hits = _search_annotations(info, question_masked)
     if hits:
         total = len(info.get("text_annotations", []))
         system_prompt += (f"\n\n## 与问题相关的标注（从全量 {total} 条标注中检索命中 {len(hits)} 条）\n"
@@ -665,13 +871,14 @@ async def drawing_chat(req: ChatRequest):
         system_prompt += ("\n\n【用户框选】第1张图是用户在图纸上框选的局部区域截图，问题针对该区域"
                           "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
 
-    user_content, with_image = _image_content_ex(req.question, req.file_id, info)
+    user_content, with_image = _image_content_ex(question_masked, req.file_id, info)
     if req.snip_image:
         user_content = _prepend_snip(user_content, req.snip_image)
         with_image = True
     result = await llm_service.chat_complete(
         messages=[
             {"role": "system", "content": system_prompt},
+        ] + _history_msgs(history) + [
             {"role": "user", "content": user_content},
         ],
         provider_index=config.drawing_provider_index,
@@ -681,7 +888,19 @@ async def drawing_chat(req: ChatRequest):
     )
     _record_usage("chat", with_image, getattr(llm_service, "last_usage", None))
 
-    return {"answer": result, "with_image": with_image}
+    # 还原 + 项目会话落库
+    new_session_id = 0
+    if req.project_id:
+        cmap2 = load_project_cipher(pdir)
+        answer = restore_text(result, cmap2)
+        new_session_id = _persist_project_session(
+            req, user, question_masked, result, req.drawing_ids)
+    elif cmap:
+        answer = restore_text(result, cmap)
+    else:
+        answer = result
+
+    return {"answer": answer, "with_image": with_image, "session_id": new_session_id}
 
 
 class MaterialRequest(BaseModel):
@@ -720,6 +939,7 @@ async def extract_materials(req: MaterialRequest):
         result, with_image, referenced, route_reason = await _set_llm_call(
             req.set_id, "提取这套图纸中的全部建筑材料，输出材料清单JSON。", "materials",
             build_prompt, 0.3, 16384)
+        result = _restore_result(result, set_id=req.set_id)
         materials = _parse_materials_json(result)
         return {"materials": materials, "with_image": with_image,
                 "referenced": referenced, "route_reason": route_reason}
@@ -768,6 +988,7 @@ async def extract_materials(req: MaterialRequest):
         module="drawing",
     )
     _record_usage("materials", with_image, getattr(llm_service, "last_usage", None))
+    result = _restore_result(result, info=info)
 
     # 解析LLM返回的JSON（裸JSON/```json围栏/带前后散文 三种形态都兼容：
     # 取第一个 [ 到最后一个 ] 之间的切片解析）
@@ -819,6 +1040,7 @@ async def generate_briefing(req: BriefingRequest):
         result, with_image, referenced, route_reason = await _set_llm_call(
             req.set_id, "请根据这套图纸生成施工图纸交底文件。", "briefing",
             build_prompt, 0.5, 16384)
+        result = _restore_result(result, set_id=req.set_id)
         return {"briefing": result, "with_image": with_image,
                 "referenced": referenced, "route_reason": route_reason}
 
@@ -888,6 +1110,7 @@ async def generate_briefing(req: BriefingRequest):
         module="drawing",
     )
     _record_usage("briefing", with_image, getattr(llm_service, "last_usage", None))
+    result = _restore_result(result, info=info)
 
     return {"briefing": result, "filename": info["filename"], "with_image": with_image}
 
