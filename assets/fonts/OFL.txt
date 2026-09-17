@@ -1,0 +1,12 @@
+NotoSansSC-subset.ttf is derived from Noto Sans CJK SC (NotoSansCJKsc-Regular.otf),
+subsetted to common CJK characters with fonttools.
+
+Copyright 2012-2022 Adobe Systems Incorporated (http://www.adobe.com/), with Reserved
+Font Name "Noto". Noto is a trademark of Google LLC.
+
+The font is licensed under the SIL Open Font License, Version 1.1.
+Full license text: https://openfontlicense.org/open-font-license-official-text/
+Source: https://github.com/notofonts/noto-cjk
+NotoSansSC-eng-subset.otf is derived from Noto Sans CJK SC (NotoSansCJKsc-Regular.otf),
+subsetted with fonttools: base charset of NotoSansSC-subset.ttf plus engineering drawing
+symbols (Φ φ × ² ³ ± ≤ ≥ ° etc.), for DXF drawing rendering in the drawing assistant.
