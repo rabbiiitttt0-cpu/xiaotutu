@@ -110,7 +110,7 @@ app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
 
 
-# ===== 前端 SPA =====
+# ===== 前端 SPA（PC 前端 / + 移动前端 /m，双前端共存）=====
 frontend_dist = BUNDLE_DIR / "frontend" / "dist"
 if not frontend_dist.exists():
     frontend_dist = WEB_ROOT / "frontend-pc" / "dist"
@@ -125,11 +125,31 @@ class ImmutableStaticFiles(StaticFiles):
         return resp
 
 
+# PC 前端 assets
+if frontend_dist.exists() and (frontend_dist / "assets").exists():
+    app.mount("/assets", ImmutableStaticFiles(directory=str(frontend_dist / "assets")), name="assets")
+
+# 移动前端 SPA（挂载 /m，须在 PC catch-all 之前注册）
+mobile_dist = WEB_ROOT / "frontend-mobile" / "dist"
+if mobile_dist.exists():
+    m_index = mobile_dist / "index.html"
+    if (mobile_dist / "assets").exists():
+        app.mount("/m/assets", ImmutableStaticFiles(directory=str(mobile_dist / "assets")), name="m_assets")
+
+    @app.get("/m", include_in_schema=False)
+    async def mobile_root():
+        return FileResponse(str(m_index), headers=_NO_CACHE_HEADERS)
+
+    @app.get("/m/{full_path:path}", include_in_schema=False)
+    async def mobile_spa(full_path: str):
+        file_path = mobile_dist / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(m_index), headers=_NO_CACHE_HEADERS)
+
+# PC 前端 SPA catch-all（最后注册，避免抢 /m）
 if frontend_dist.exists():
     index_path = frontend_dist / "index.html"
-    assets_dir = frontend_dist / "assets"
-    if assets_dir.exists():
-        app.mount("/assets", ImmutableStaticFiles(directory=str(assets_dir)), name="assets")
 
     @app.api_route("/{full_path:path}", methods=["GET"], include_in_schema=False)
     async def spa_catch_all(full_path: str):
