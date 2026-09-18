@@ -76,8 +76,10 @@ def _recover_on_startup():
         for d in requeue:
             d.status = "pending"
             d.error = None
-        pending = db.query(ProjectDrawing).filter(ProjectDrawing.status == "pending").all()
+        # SessionLocal 是 autoflush=False：必须先 commit 再查 pending，
+        # 否则下面的查询读到的是旧状态，入队 0 条（2026-09-18 生产踩过）
         db.commit()
+        pending = db.query(ProjectDrawing).filter(ProjectDrawing.status == "pending").all()
         for d in pending:
             enqueue(d.id)
         if requeue or pending:
