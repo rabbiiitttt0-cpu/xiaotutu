@@ -57,23 +57,32 @@ def start_worker():
     logger.info("[项目预处理] worker 已启动（串行）")
 
 
+RESTART_INTERRUPT_ERROR = "服务重启中断，请删除后重新上传"
+
+
 def _recover_on_startup():
     from db.database import SessionLocal
     from db.models.project import ProjectDrawing
 
     db = SessionLocal()
     try:
-        stuck = db.query(ProjectDrawing).filter(ProjectDrawing.status == "processing").all()
-        for d in stuck:
-            d.status = "failed"
-            d.error = "服务重启中断，请删除后重新上传"
+        # 重启非破坏性：中断的 processing 直接重新排队（原来是置 failed 要人工重传，
+        # 但每次发版重启都会批量误杀在途图纸）。已置 failed 且错误是重启中断的也一并重排。
+        requeue = db.query(ProjectDrawing).filter(
+            (ProjectDrawing.status == "processing")
+            | ((ProjectDrawing.status == "failed")
+               & (ProjectDrawing.error == RESTART_INTERRUPT_ERROR))
+        ).all()
+        for d in requeue:
+            d.status = "pending"
+            d.error = None
         pending = db.query(ProjectDrawing).filter(ProjectDrawing.status == "pending").all()
         db.commit()
         for d in pending:
             enqueue(d.id)
-        if stuck or pending:
-            logger.info("[项目预处理] 重启恢复：%d 中断置失败，%d 待处理重新入队",
-                        len(stuck), len(pending))
+        if requeue or pending:
+            logger.info("[项目预处理] 重启恢复：%d 中断重排，%d 待处理入队",
+                        len(requeue), len(pending))
     finally:
         db.close()
 
