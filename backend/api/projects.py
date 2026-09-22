@@ -46,6 +46,7 @@ def _drawing_card(d: ProjectDrawing) -> dict:
     return {
         "id": d.id,
         "filename": d.filename,
+        "rel_path": d.rel_path or d.filename,
         "file_type": d.file_type,
         "status": d.status,
         "error": d.error,
@@ -279,6 +280,35 @@ async def list_project_drawings(project_id: int, scope: str = "frequent",
         if scope == "frequent":
             drawings = [d for d in drawings if d.is_frequent]
     return [_drawing_card(d) for d in drawings]
+
+
+@router.get("/{project_id}/drawings-tree")
+async def list_project_drawings_tree(project_id: int, db: Session = Depends(get_db),
+                                     user: User = Depends(get_current_user)):
+    """按压缩包目录层级返回 ready 图纸树，前端用 el-tree 展示。"""
+    _require_member(db, project_id, user)
+    drawings = db.query(ProjectDrawing).filter_by(
+        project_id=project_id, status="ready").order_by(ProjectDrawing.rel_path).all()
+
+    root: dict = {"__dirs__": {}, "__files__": []}
+    for d in drawings:
+        parts = [p for p in (d.rel_path or d.filename).split("/") if p]
+        node = root
+        for part in parts[:-1]:
+            node = node["__dirs__"].setdefault(part, {"__dirs__": {}, "__files__": []})
+        node["__files__"].append(_drawing_card(d))
+
+    def build(node: dict) -> list:
+        result = []
+        for name in sorted(node["__dirs__"].keys()):
+            sub = node["__dirs__"][name]
+            children = build(sub)
+            result.append({"type": "dir", "name": name, "children": children})
+        for f in node["__files__"]:
+            result.append({"type": "file", **f})
+        return result
+
+    return build(root)
 
 
 @router.get("/{project_id}/drawings/{drawing_id}/info")

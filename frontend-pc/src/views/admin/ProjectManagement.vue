@@ -71,44 +71,84 @@
             </span>
           </div>
 
-          <el-table :data="drawings" stripe border size="small" v-loading="drawingsLoading">
-            <el-table-column prop="filename" label="文件名" min-width="180" show-overflow-tooltip />
-            <el-table-column label="类型" width="60">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.file_type === 'pdf' ? 'warning' : 'success'">
-                  {{ row.file_type.toUpperCase() }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }">
-                <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="近期常用" width="80">
-              <template #default="{ row }">
-                <el-switch
-                  :model-value="row.is_frequent" :disabled="row.status !== 'ready'"
-                  @change="(v) => toggleFrequent(row, v)"
-                />
-              </template>
-            </el-table-column>
-            <el-table-column label="失败原因" min-width="140">
-              <template #default="{ row }">
-                <span v-if="row.error" style="color: #f56c6c; font-size: 12px">{{ row.error }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="70">
-              <template #default="{ row }">
-                <el-popconfirm title="删除该图纸及预处理产物？" width="200" @confirm="removeDrawing(row)">
-                  <template #reference>
-                    <el-button size="small" type="danger" text>删除</el-button>
+          <!-- 有目录层级时用树形展示，否则用平铺表格 -->
+          <template v-if="hasDirs">
+            <el-tree
+              :data="treeData"
+              node-key="key"
+              :props="{ label: 'name', children: 'children' }"
+              default-expand-all
+              :expand-on-click-node="false"
+              stripe
+              style="margin-top: 8px"
+            >
+              <template #default="{ data }">
+                <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0">
+                  <el-icon v-if="data.type === 'dir'" :size="14" style="color: #e6a23c"><Folder /></el-icon>
+                  <el-icon v-else :size="14" style="color: #409eff"><Document /></el-icon>
+                  <span v-if="data.type === 'dir'" style="font-weight: 600; font-size: 13px">{{ data.name }}</span>
+                  <template v-else>
+                    <span style="font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ data.filename }}</span>
+                    <el-tag size="small" :type="data.file_type === 'pdf' ? 'warning' : 'success'" style="flex-shrink: 0">
+                      {{ data.file_type.toUpperCase() }}
+                    </el-tag>
+                    <el-tag size="small" :type="statusType(data.status)" style="flex-shrink: 0">{{ statusText(data.status) }}</el-tag>
+                    <el-switch
+                      :model-value="data.is_frequent" :disabled="data.status !== 'ready'"
+                      size="small" style="flex-shrink: 0"
+                      @change="(v) => toggleFrequent(data, v)"
+                    />
+                    <el-popconfirm title="删除该图纸及预处理产物？" width="200" @confirm="removeDrawing(data)">
+                      <template #reference>
+                        <el-button size="small" type="danger" text style="flex-shrink: 0">删除</el-button>
+                      </template>
+                    </el-popconfirm>
                   </template>
-                </el-popconfirm>
+                </div>
               </template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-if="!drawings.length && !drawingsLoading" description="尚未上传图纸" :image-size="60" />
+            </el-tree>
+          </template>
+
+          <template v-else>
+            <el-table :data="drawings" stripe border size="small" v-loading="drawingsLoading">
+              <el-table-column prop="filename" label="文件名" min-width="180" show-overflow-tooltip />
+              <el-table-column label="类型" width="60">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.file_type === 'pdf' ? 'warning' : 'success'">
+                    {{ row.file_type.toUpperCase() }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="近期常用" width="80">
+                <template #default="{ row }">
+                  <el-switch
+                    :model-value="row.is_frequent" :disabled="row.status !== 'ready'"
+                    @change="(v) => toggleFrequent(row, v)"
+                  />
+                </template>
+              </el-table-column>
+              <el-table-column label="失败原因" min-width="140">
+                <template #default="{ row }">
+                  <span v-if="row.error" style="color: #f56c6c; font-size: 12px">{{ row.error }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="70">
+                <template #default="{ row }">
+                  <el-popconfirm title="删除该图纸及预处理产物？" width="200" @confirm="removeDrawing(row)">
+                    <template #reference>
+                      <el-button size="small" type="danger" text>删除</el-button>
+                    </template>
+                  </el-popconfirm>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+          <el-empty v-if="!drawings.length && !drawingsLoading && !hasDirs" description="尚未上传图纸" :image-size="60" />
         </el-tab-pane>
 
         <!-- ===== 成员 ===== -->
@@ -217,7 +257,10 @@ function openDetail(row) {
 const drawings = ref([])
 const drawingsLoading = ref(false)
 const zipUploading = ref(false)
+const treeData = ref([])
 let pollTimer = null
+
+const hasDirs = computed(() => treeData.value.length > 0 && treeData.value.some(n => n.type === 'dir'))
 
 function statusType(s) {
   return { ready: 'success', processing: 'warning', pending: 'info', failed: 'danger' }[s] || 'info'
@@ -226,12 +269,37 @@ function statusText(s) {
   return { ready: '就绪', processing: '处理中', pending: '排队中', failed: '失败' }[s] || s
 }
 
+function buildTree(drawings) {
+  const root = { __dirs__: {}, __files__: [] }
+  for (const d of drawings) {
+    const parts = (d.rel_path || d.filename).split('/').filter(Boolean)
+    let node = root
+    for (const part of parts.slice(0, -1)) {
+      node = node.__dirs__[part] ||= { __dirs__: {}, __files__: [] }
+    }
+    node.__files__.push(d)
+  }
+  function build(node, prefix) {
+    const result = []
+    for (const [name, sub] of Object.entries(node.__dirs__).sort()) {
+      const key = prefix ? `${prefix}/${name}` : name
+      result.push({ key, type: 'dir', name, children: build(sub, key) })
+    }
+    for (const f of node.__files__) {
+      result.push({ key: `f-${f.id}`, type: 'file', ...f })
+    }
+    return result
+  }
+  return build(root, '')
+}
+
 async function loadDrawings() {
   if (!current.value) return
   drawingsLoading.value = true
   try {
     const { data } = await projectsApi.drawings(current.value.id, 'admin')
     drawings.value = data
+    treeData.value = buildTree(data)
     // 有排队/处理中的图纸时轮询进度（3s）
     const busy = data.some(d => d.status === 'pending' || d.status === 'processing')
     clearTimeout(pollTimer)

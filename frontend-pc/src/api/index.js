@@ -177,6 +177,7 @@ export const projects = {
   sessions: (id) => api.get(`/projects/${id}/sessions`),
   getSession: (id, sid) => api.get(`/projects/${id}/sessions/${sid}`),
   removeSession: (id, sid) => api.delete(`/projects/${id}/sessions/${sid}`),
+  drawingsTree: (id) => api.get(`/projects/${id}/drawings-tree`),
 }
 
 // ===== 审计日志 =====

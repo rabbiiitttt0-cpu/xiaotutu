@@ -103,6 +103,7 @@ const menus = computed(() => [
         { path: '/admin/projects', label: '项目管理', icon: 'FolderOpened' },
         { path: '/admin/users', label: '用户管理', icon: 'UserFilled' },
         { path: '/admin/audit-logs', label: '日志查询', icon: 'Document' },
+        { path: '/admin/settings', label: '系统设置', icon: 'Setting' },
       ]
     : []),
 ])

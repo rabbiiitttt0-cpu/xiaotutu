@@ -3,9 +3,12 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime, timedelta
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
-from config import DATA_DIR, load_config
+from auth.deps import require_super_admin
+from auth.models import User
+from config import DATA_DIR, load_config, save_config, AppConfig, LLMProviderConfig
 
 router = APIRouter(prefix="/api/system", tags=["系统状态"])
 
@@ -123,3 +126,68 @@ async def llm_providers_public():
         if k.endswith("_provider_index")
     }
     return {"providers": providers, "bindings": bindings}
+
+
+# ==================== 模型设置（仅超管） ====================
+
+class ProviderUpdateRequest(BaseModel):
+    """更新 LLM Provider 配置（api_key 传空字符串表示不修改）"""
+    name: str
+    provider: str
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    enabled: bool = True
+    supports_vision: bool = False
+    thinking_effort: str = "off"
+
+
+@router.get("/llm-config")
+async def get_llm_config(user: User = Depends(require_super_admin)):
+    """完整 LLM 配置（含 API Key 脱敏）。仅超管。"""
+    cfg = load_config()
+    providers = []
+    for i, p in enumerate(cfg.providers):
+        d = p.model_dump()
+        if d.get("api_key"):
+            d["api_key"] = d["api_key"][:4] + "****" + d["api_key"][-4:]
+        d["index"] = i
+        providers.append(d)
+    return {
+        "providers": providers,
+        "drawing_provider_index": cfg.drawing_provider_index,
+        "agent_settings": cfg.agent_settings.model_dump(),
+    }
+
+
+@router.put("/llm-config")
+async def update_llm_config(body: dict, user: User = Depends(require_super_admin)):
+    """整体保存 LLM 配置。仅超管。"""
+    cfg = load_config()
+
+    if "providers" in body:
+        new_providers = []
+        for p_data in body["providers"]:
+            # api_key 脱敏值不覆盖原值
+            if "api_key" in p_data and "****" in str(p_data["api_key"]):
+                idx = p_data.pop("index", None)
+                if idx is not None and idx < len(cfg.providers):
+                    p_data["api_key"] = cfg.providers[idx].api_key
+            p_data.pop("index", None)
+            new_providers.append(LLMProviderConfig(**p_data))
+        cfg.providers = new_providers
+
+    if "drawing_provider_index" in body:
+        idx = body["drawing_provider_index"]
+        if not (0 <= idx < len(cfg.providers)):
+            raise HTTPException(status_code=400, detail="drawing_provider_index 超出范围")
+        cfg.drawing_provider_index = idx
+
+    if "agent_settings" in body:
+        from config import AgentSettings
+        cfg.agent_settings = AgentSettings(**body["agent_settings"])
+
+    save_config(cfg)
+    return {"ok": True}

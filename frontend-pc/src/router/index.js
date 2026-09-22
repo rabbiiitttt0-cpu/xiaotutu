@@ -35,6 +35,12 @@ const routes = [
     component: () => import('../views/admin/AuditLogs.vue'),
     meta: { title: '日志查询', requiresSuperAdmin: true },
   },
+  {
+    path: '/admin/settings',
+    name: 'AdminSettings',
+    component: () => import('../views/admin/Settings.vue'),
+    meta: { title: '系统设置', requiresSuperAdmin: true },
+  },
 ]
 
 const router = createRouter({

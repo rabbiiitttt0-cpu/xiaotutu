@@ -180,6 +180,12 @@ def process_drawing(drawing_id: int):
         rec.processed_at = datetime.now()
         db.commit()
         logger.info("[项目预处理] 完成: drawing=%s file=%s", drawing_id, rec.filename)
+
+        # 6. 清理 DXF 中间文件（用完即删，不占磁盘）
+        if suffix == ".dwg":
+            dxf_path.unlink(missing_ok=True)
+        # 解析中间 JSON 也删（原始解析结果已脱敏落到 drawing_uploads）
+        (pdir / f"{fid}.parsed.json").unlink(missing_ok=True)
     except Exception as e:
         rec = db.get(ProjectDrawing, drawing_id)
         if rec:
@@ -208,8 +214,10 @@ def ingest_zip(project_id: int, zip_bytes: bytes, uploaded_by: int) -> dict:
     try:
         with zipfile.ZipFile(zip_path) as zf:
             for name in zf.namelist():
-                fn = Path(name).name  # 拍平目录层级
-                if not fn or fn.startswith(".") or name.endswith("/"):
+                if name.endswith("/"):
+                    continue
+                fn = Path(name).name
+                if not fn or fn.startswith("."):
                     continue
                 suffix = Path(fn).suffix.lower()
                 if suffix not in SUPPORTED_SUFFIX:
@@ -220,6 +228,17 @@ def ingest_zip(project_id: int, zip_bytes: bytes, uploaded_by: int) -> dict:
                     fn_fixed = fn.encode("cp437").decode("gbk")
                 except (UnicodeEncodeError, UnicodeDecodeError):
                     fn_fixed = fn
+                # 保留压缩包内目录层级（如 04-暖通/计算书/xxx.dwg）
+                parts = name.split("/")
+                rel_parts = []
+                for p in parts[:-1]:
+                    try:
+                        p_fixed = p.encode("cp437").decode("gbk")
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        p_fixed = p
+                    if p_fixed and not p_fixed.startswith("."):
+                        rel_parts.append(p_fixed)
+                rel_path = "/".join(rel_parts + [fn_fixed]) if rel_parts else fn_fixed
                 dest = pdir / f"orig_{uuid.uuid4().hex[:8]}{suffix}"
                 dest.write_bytes(zf.read(name))
 
@@ -227,13 +246,14 @@ def ingest_zip(project_id: int, zip_bytes: bytes, uploaded_by: int) -> dict:
                 try:
                     rec = ProjectDrawing(
                         project_id=project_id, filename=fn_fixed,
+                        rel_path=rel_path,
                         file_type=suffix.lstrip("."), status="pending",
                         original_path=str(dest), uploaded_by=uploaded_by,
                     )
                     db.add(rec)
                     db.commit()
                     db.refresh(rec)
-                    created.append({"id": rec.id, "filename": fn_fixed})
+                    created.append({"id": rec.id, "filename": fn_fixed, "rel_path": rel_path})
                     enqueue(rec.id)
                 finally:
                     db.close()

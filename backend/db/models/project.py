@@ -36,6 +36,7 @@ class ProjectDrawing(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     filename = Column(String(255), nullable=False)
+    rel_path = Column(String(500), default="")           # 压缩包内相对路径（含目录层级，如 04-暖通/计算书/xxx.dwg）
     file_type = Column(String(10), default="")           # dwg / dxf / pdf
     status = Column(String(20), default="pending")       # pending/processing/ready/failed
     error = Column(Text, default="")
