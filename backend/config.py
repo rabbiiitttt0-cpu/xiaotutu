@@ -1,4 +1,4 @@
-"""全局配置（小图兔精简版：只保留 LLM Provider + 识图设置）"""
+"""全局配置（看图兔精简版：只保留 LLM Provider + 识图设置）"""
 import json
 import os
 import sys

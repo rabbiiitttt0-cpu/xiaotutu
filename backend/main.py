@@ -158,6 +158,14 @@ if mobile_dist.exists():
 if frontend_dist.exists():
     index_path = frontend_dist / "index.html"
 
+    @app.get("/pc", include_in_schema=False)
+    async def pc_redirect():
+        return FileResponse(str(index_path), headers=_NO_CACHE_HEADERS)
+
+    @app.get("/mobile", include_in_schema=False)
+    async def mobile_redirect():
+        return FileResponse(str(mobile_dist / "index.html"), headers=_NO_CACHE_HEADERS)
+
     @app.api_route("/{full_path:path}", methods=["GET"], include_in_schema=False)
     async def spa_catch_all(full_path: str):
         file_path = frontend_dist / full_path

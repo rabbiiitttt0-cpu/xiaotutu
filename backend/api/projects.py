@@ -248,6 +248,15 @@ async def delete_drawing(project_id: int, drawing_id: int, db: Session = Depends
         raise HTTPException(status_code=404, detail="图纸不存在")
     project_service.remove_drawing_cache(d)
     db.delete(d)
+    # 同步清理图纸集中的引用，避免点图纸集时因悬空 id 报 400
+    for s in db.query(ProjectDrawingSet).filter_by(project_id=project_id).all():
+        ids = json.loads(s.drawing_ids or "[]")
+        if drawing_id in ids:
+            ids.remove(drawing_id)
+            if ids:
+                s.drawing_ids = json.dumps(ids)
+            else:
+                db.delete(s)  # 集内图纸删空则删掉空集
     db.commit()
     return {"message": "已删除"}
 
@@ -334,7 +343,11 @@ async def drawing_info(project_id: int, drawing_id: int, db: Session = Depends(g
     return info
 
 
-# ==================== 成员：图纸集（成员可建，项目共享） ====================
+# ==================== 成员：图纸集（项目共享；预设/编辑/删除仅管理员） ====================
+
+def _require_admin(user: User):
+    if not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="仅管理员可管理图纸集")
 
 def _set_card(s: ProjectDrawingSet) -> dict:
     return {
@@ -364,6 +377,7 @@ class SetIn(BaseModel):
 async def create_set(project_id: int, data: SetIn, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     _require_member(db, project_id, user)
+    _require_admin(user)
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="图纸集名称不能为空")
@@ -381,6 +395,7 @@ async def create_set(project_id: int, data: SetIn, db: Session = Depends(get_db)
 async def update_set(project_id: int, set_id: int, data: SetIn,
                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _require_member(db, project_id, user)
+    _require_admin(user)
     s = db.query(ProjectDrawingSet).filter_by(id=set_id, project_id=project_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="图纸集不存在")
@@ -396,6 +411,7 @@ async def update_set(project_id: int, set_id: int, data: SetIn,
 async def delete_set(project_id: int, set_id: int, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     _require_member(db, project_id, user)
+    _require_admin(user)
     s = db.query(ProjectDrawingSet).filter_by(id=set_id, project_id=project_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="图纸集不存在")

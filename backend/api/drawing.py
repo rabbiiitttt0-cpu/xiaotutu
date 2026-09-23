@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -54,7 +55,8 @@ def _png_path(file_id: str) -> Path:
 
 
 def _png_paths(file_id: str) -> list[Path]:
-    """该图纸的全部渲染图：DXF 单张 {fid}.png（有 _hi 高清版优先）；PDF 逐页 {fid}_pN.png"""
+    """该图纸的全部渲染图：首页整图（{fid}_hi 或 {fid}.png），其后 {fid}_pN.png
+    按页码数值排序（PDF 多页 / 多图框切片）。分块图 {fid}_pN_tRC.png 不算页，排除。"""
     paths = []
     hi = UPLOAD_DIR / f"{file_id}_hi.png"
     if hi.exists():
@@ -63,7 +65,13 @@ def _png_paths(file_id: str) -> list[Path]:
         single = _png_path(file_id)
         if single.exists():
             paths.append(single)
-    paths.extend(sorted(UPLOAD_DIR.glob(f"{file_id}_p*.png")))
+    page_pat = re.compile(rf"^{re.escape(file_id)}_p(\d+)$")
+    pages = []
+    for p in UPLOAD_DIR.glob(f"{file_id}_p*.png"):
+        m = page_pat.match(p.stem)
+        if m:
+            pages.append((int(m.group(1)), p))
+    paths.extend(p for _, p in sorted(pages))
     return paths
 
 
@@ -132,13 +140,18 @@ def _image_content_ex(text: str, file_id: str, info: dict) -> tuple[object, bool
 
 
 def _vision_note(info: dict, has_image: bool, base: str) -> str:
-    """视觉附注：tiled 图纸附加网格分块拼接说明（防跨块信息错位/重叠区误判两处）"""
+    """视觉附注：tiled 图纸附加网格分块拼接说明（防跨块信息错位/重叠区误判两处）；
+    多图框切片图纸说明页序（首图=整图总览，其后各页=按阅读序的单个图框切片）"""
     if not has_image:
         return ""
     if info.get("tiled"):
         return ("\n\n附：本消息附带图像依次为【整页总览】+【网格分块放大图（2列×2行，"
                 "相邻块有15%重叠）】。总览用于定位空间关系；分块重叠区中重复出现的"
                 "文字/图元属正常拼接设计，请勿当成两处；跨块信息请对照总览图拼接理解。")
+    if info.get("frame_count") and (info.get("image_count") or 0) > 1:
+        return (f"\n\n附：该图纸含多个图框已切片，共 {info.get('frame_count')} 个图幅。"
+                "图像依次为【整图总览】+【各图幅切片（按上→下、左→右阅读序）】；"
+                "问题涉及具体某张图纸时请优先对照对应图幅切片。")
     return base
 
 

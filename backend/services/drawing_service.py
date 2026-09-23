@@ -1,5 +1,6 @@
 """DXF图纸解析服务"""
 import json
+import logging
 import platform
 import subprocess
 from pathlib import Path
@@ -7,6 +8,10 @@ from pathlib import Path
 import ezdxf
 from ezdxf import recover
 from ezdxf.tools import crypt as _crypt
+
+# ezdxf 前端渲染在 INFO 级刷「skipped invisible entity」之类的逐实体日志，
+# 大图能滚出 10MB 级日志（2026-09-23 生产 ~20 分钟轮转一次，历史全被冲掉）。
+logging.getLogger("ezdxf").setLevel(logging.WARNING)
 
 _LIBREDWG_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "bin" / "libredwg"
 
@@ -291,6 +296,57 @@ def _generate_description(filename, layers, entity_counts, text_annotations, blo
     return "\n".join(lines)
 
 
+def apply_cjk_fonts(doc) -> None:
+    """中文字形：把内置 CJK 字体注册给 ezdxf 字体管理器，并将文字样式统一
+    映射到内置 TTF——DXF 默认 SHX 字体（txt/gbcbig/hztxt.shx）无字形文件时
+    中文会渲染成方框（fallback ARIALUNI.TTF 一般不存在）。
+    优先用工程扩展子集（含 Φ×²³± 等图纸符号），缺文件回退交底图表子集。
+    （render_dxf_png 与 frame_detect 切片渲染共用）"""
+    from services.chart_render.fonts import FONT_PATH as CHART_FONT
+    from ezdxf import options as ez_options
+    from ezdxf.fonts import fonts as ez_fonts
+    eng_font = CHART_FONT.parent / "NotoSansSC-eng-subset.otf"
+    font_file = eng_font if eng_font.exists() else CHART_FONT
+    if font_file.exists():
+        font_dir = str(font_file.parent)
+        if font_dir not in ez_options.support_dirs:
+            ez_options.support_dirs.append(font_dir)
+        try:
+            ez_fonts.font_manager.scan_folder(font_file.parent)
+        except Exception:
+            pass
+        for style in doc.styles:
+            try:
+                style.dxf.font = font_file.name
+            except Exception:
+                pass
+
+
+def patch_ezdxf_acis_tolerance():
+    """容忍 LibreDWG 转出的 ACIS SAT 数据含非 ASCII 字符。
+
+    ezdxf 解码 SAT 行时严格 bytes(text, 'ascii')，一个 3DSOLID 脏数据就能让
+    整份 DXF readfile/recover 双双失败（实测同文件不同进程结果不一）。3D
+    实体对 2D 渲染/图框切片无影响，解码失败时忽略高字节降级即可。
+    """
+    try:
+        from ezdxf.tools import crypt
+        if getattr(crypt._decode, "_xt_tolerant", False):
+            return
+        orig_decode = crypt._decode
+
+        def _decode(text: str) -> str:
+            try:
+                return orig_decode(text)
+            except UnicodeEncodeError:
+                return orig_decode(text.encode("ascii", "ignore").decode("ascii"))
+
+        _decode._xt_tolerant = True
+        crypt._decode = _decode
+    except Exception:
+        pass
+
+
 def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
     """把 DXF 模型空间渲染为 PNG（白底黑线，供视觉模型识图）。
     同时尝试输出 SVG 矢量图（文字转曲线路径，浏览器预览无限放大不糊），
@@ -300,6 +356,7 @@ def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
     中文标注走 chart_render 的内置思源黑体注册。失败返回 None（不阻断上传流程）。
     """
     try:
+        patch_ezdxf_acis_tolerance()
         from services.chart_render.fonts import register_matplotlib
         register_matplotlib()
         import matplotlib.pyplot as plt
@@ -313,28 +370,7 @@ def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
             doc, _ = recover.readfile(file_path)
         msp = doc.modelspace()
 
-        # 中文字形：把内置 CJK 字体注册给 ezdxf 字体管理器，并将文字样式统一
-        # 映射到内置 TTF——DXF 默认 SHX 字体（txt/gbcbig/hztxt.shx）无字形文件时
-        # 中文会渲染成方框（fallback ARIALUNI.TTF 一般不存在）
-        # 优先用工程扩展子集（含 Φ×²³± 等图纸符号），缺文件回退交底图表子集
-        from services.chart_render.fonts import FONT_PATH as CHART_FONT
-        from ezdxf import options as ez_options
-        from ezdxf.fonts import fonts as ez_fonts
-        eng_font = CHART_FONT.parent / "NotoSansSC-eng-subset.otf"
-        font_file = eng_font if eng_font.exists() else CHART_FONT
-        if font_file.exists():
-            font_dir = str(font_file.parent)
-            if font_dir not in ez_options.support_dirs:
-                ez_options.support_dirs.append(font_dir)
-            try:
-                ez_fonts.font_manager.scan_folder(font_file.parent)
-            except Exception:
-                pass
-            for style in doc.styles:
-                try:
-                    style.dxf.font = font_file.name
-                except Exception:
-                    pass
+        apply_cjk_fonts(doc)
 
         fig = plt.figure(figsize=(12, 12))
         ax = fig.add_axes([0, 0, 1, 1])
