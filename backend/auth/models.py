@@ -1,4 +1,4 @@
-"""用户模型（小图兔简化版：无项目成员/授权/模块开关）"""
+"""用户模型（看图兔简化版：无项目成员/授权/模块开关）"""
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
 
 from db.database import Base

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 小图兔部署：本机打 bundle_xiaotutu.tar.gz 上传 /tmp 后执行
+# 看图兔部署：本机打 bundle_xiaotutu.tar.gz 上传 /tmp 后执行
 # 用法：bash deploy/deploy.sh
 set -e
 REL=/opt/xiaotutu
@@ -21,7 +21,7 @@ for i in $(seq 1 24); do
   echo "$HEALTH" | grep -q '"status": *"ok"' && break
 done
 if echo "$HEALTH" | grep -q '"status": *"ok"'; then
-  echo "小图兔部署成功"
+  echo "看图兔部署成功"
 else
   echo "健康检查失败（${HEALTH:0:120}），回滚"
   docker compose -p xiaotutu down

@@ -1,4 +1,4 @@
-"""FastAPI 依赖注入 - 认证（小图兔简化版）"""
+"""FastAPI 依赖注入 - 认证（看图兔简化版）"""
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session

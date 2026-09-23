@@ -1,4 +1,4 @@
-"""认证路由 - 注册/登录/Token/用户管理（小图兔简化版，无三级权限/授权）"""
+"""认证路由 - 注册/登录/Token/用户管理（看图兔简化版，无三级权限/授权）"""
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
