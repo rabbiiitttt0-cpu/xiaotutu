@@ -151,6 +151,7 @@ export const drawing = {
 export const projects = {
   mine: () => api.get('/projects/mine'),
   drawings: (id, scope = 'frequent') => api.get(`/projects/${id}/drawings`, { params: { scope } }),
+  drawingsTree: (id) => api.get(`/projects/${id}/drawings-tree`),
   drawingInfo: (id, did) => api.get(`/projects/${id}/drawings/${did}/info`),
   sets: (id) => api.get(`/projects/${id}/sets`),
   sessions: (id) => api.get(`/projects/${id}/sessions`),
