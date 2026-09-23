@@ -45,39 +45,61 @@
         />
 
         <template v-else>
-          <!-- 图纸集（常用置顶：一次问答常用的一组图纸，项目共享） -->
-          <div v-if="projSets.length" style="margin-top: 10px">
-            <el-divider content-position="left">图纸集</el-divider>
-            <el-tag
-              v-for="s in projSets" :key="s.id" type="warning" effect="plain"
-              style="margin: 0 6px 6px 0; cursor: pointer"
-              @click="applySet(s)"
-            >
-              {{ s.name }}（{{ s.drawing_ids.length }} 张）
-            </el-tag>
-          </div>
+          <!-- 选图纸 / 图纸集 切换 -->
+          <el-radio-group v-model="projPickMode" size="small" style="width: 100%; margin-top: 10px">
+            <el-radio-button value="browse" style="width: 50%">选图纸</el-radio-button>
+            <el-radio-button value="sets" style="width: 50%">图纸集</el-radio-button>
+          </el-radio-group>
 
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px">
-            <span style="font-size: 13px; color: #606266">项目图纸</span>
-            <el-switch
-              v-model="showAllDrawings" active-text="全部" inactive-text="常用"
-              inline-prompt @change="loadProjDrawings"
-            />
-          </div>
-          <el-checkbox-group
-            v-model="selectedDrawingIds"
-            style="max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; margin-top: 4px"
-          >
-            <el-checkbox v-for="d in projDrawings" :key="d.id" :value="d.id">
-              <span style="font-size: 13px">{{ d.filename }}</span>
-              <el-tag v-if="d.is_frequent" size="small" type="warning" style="margin-left: 4px">常用</el-tag>
-            </el-checkbox>
-            <el-empty
-              v-if="!projDrawings.length"
-              :description="showAllDrawings ? '项目暂无已处理图纸' : '暂无常用图纸，切到「全部」查看'"
-              :image-size="40"
-            />
-          </el-checkbox-group>
+          <!-- 图纸集模式：点击整组载入（由管理员预设） -->
+          <template v-if="projPickMode === 'sets'">
+            <div style="margin-top: 8px">
+              <el-empty v-if="!projSets.length" description="暂无图纸集，请联系管理员在项目管理中预设" :image-size="40" />
+              <el-tag
+                v-for="s in projSets" :key="s.id" type="warning" effect="plain"
+                style="margin: 0 6px 6px 0; cursor: pointer"
+                @click="applySet(s)"
+              >
+                {{ s.name }}（{{ s.drawing_ids.length }} 张）
+              </el-tag>
+            </div>
+          </template>
+
+          <!-- 选图纸模式：按压缩包目录结构分组折叠 -->
+          <template v-else>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px">
+              <span style="font-size: 13px; color: #606266">项目图纸</span>
+              <el-switch
+                v-model="showAllDrawings" active-text="全部" inactive-text="常用"
+                inline-prompt
+              />
+            </div>
+            <div style="max-height: 240px; overflow-y: auto; margin-top: 4px">
+              <el-checkbox-group v-model="selectedDrawingIds" style="display: flex; flex-direction: column">
+                <template v-for="g in drawingGroups" :key="g.key">
+                  <div class="dg-head" @click="toggleGroup(g)">
+                    <el-icon :size="13" style="color: #e6a23c"><Folder /></el-icon>
+                    <span style="font-weight: 600">{{ g.name }}</span>
+                    <span style="color: #909399; font-size: 12px">（{{ g.files.length }} 张）</span>
+                    <el-icon :size="12" style="margin-left: auto; color: #909399">
+                      <ArrowDown v-if="!collapsedGroups[g.key]" /><ArrowRight v-else />
+                    </el-icon>
+                  </div>
+                  <template v-if="!collapsedGroups[g.key]">
+                    <el-checkbox v-for="f in g.files" :key="f.id" :value="f.id" style="padding-left: 16px">
+                      <span style="font-size: 13px">{{ f.filename }}</span>
+                      <el-tag v-if="f.is_frequent" size="small" type="warning" style="margin-left: 4px">常用</el-tag>
+                    </el-checkbox>
+                  </template>
+                </template>
+                <el-empty
+                  v-if="!drawingGroups.length"
+                  :description="showAllDrawings ? '项目暂无已处理图纸' : '暂无常用图纸，切到「全部」查看'"
+                  :image-size="40"
+                />
+              </el-checkbox-group>
+            </div>
+          </template>
 
           <div style="display: flex; gap: 8px; margin-top: 10px">
             <el-button
@@ -85,9 +107,6 @@
               :disabled="!selectedDrawingIds.length" @click="applyProjectDrawings(true)"
             >
               开始问答（已选 {{ selectedDrawingIds.length }} 张）
-            </el-button>
-            <el-button :disabled="selectedDrawingIds.length < 2" @click="saveAsSet">
-              存为图纸集
             </el-button>
           </div>
           <div style="font-size: 12px; color: #909399; margin-top: 6px">
@@ -512,7 +531,7 @@
 
 <script setup>
 import { ref, computed, nextTick, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { drawing as drawingApi, projects as projectsApi } from '../api'
 import TutorialOverlay from '../components/TutorialOverlay.vue'
 
@@ -544,12 +563,44 @@ const activeSheetId = ref('')
 const sourceMode = ref('upload')        // upload 本地上传 | project 项目图纸
 const myProjects = ref([])              // 我参与的项目
 const activeProjectId = ref(null)       // 当前选中项目
-const projDrawings = ref([])            // 项目图纸列表（常用/全部）
-const projSets = ref([])                // 项目图纸集
+const projTree = ref([])                // 项目图纸目录树（drawings-tree）
+const projSets = ref([])                // 项目图纸集（管理员预设）
+const projPickMode = ref('browse')      // browse 选图纸 | sets 图纸集
 const selectedDrawingIds = ref([])      // 勾选的项目图纸
-const showAllDrawings = ref(false)      // 常用 | 全部 开关
+const collapsedGroups = ref({})         // 折叠的分组 key → true
+const showAllDrawings = ref(false)      // 常用（默认）| 全部
 const projApplying = ref(false)         // 开始问答加载中
 const projSessionId = ref(0)            // 项目会话 id（0=未建）
+
+// 目录树拍平为分组：根目录文件 + 各文件夹（含多级路径名）一组，保持压缩包结构
+const drawingGroups = computed(() => {
+  const groups = []
+  const rootFiles = []
+  const keep = (f) => showAllDrawings.value || f.is_frequent
+  const walk = (nodes, path) => {
+    for (const n of nodes || []) {
+      if (n.type === 'dir') {
+        walk(n.children, path ? `${path}/${n.name}` : n.name)
+      } else if (!keep(n)) {
+        continue
+      } else if (!path) {
+        rootFiles.push(n)
+      } else {
+        let g = groups.find(x => x.key === path)
+        if (!g) { g = { key: path, name: path, files: [] }; groups.push(g) }
+        g.files.push(n)
+      }
+    }
+  }
+  walk(projTree.value, '')
+  const result = []
+  if (rootFiles.length) result.push({ key: '__root__', name: '根目录', files: rootFiles })
+  return result.concat(groups)
+})
+
+function toggleGroup(g) {
+  collapsedGroups.value[g.key] = !collapsedGroups.value[g.key]
+}
 
 // ===== 项目图纸模式（函数） =====
 
@@ -579,21 +630,12 @@ function onProjectChange() {
 async function loadProjDrawings() {
   if (!activeProjectId.value) return
   try {
-    const scope = showAllDrawings.value ? 'all' : 'frequent'
-    const [d, s] = await Promise.all([
-      projectsApi.drawings(activeProjectId.value, scope),
+    const [t, s] = await Promise.all([
+      projectsApi.drawingsTree(activeProjectId.value),
       projectsApi.sets(activeProjectId.value),
     ])
-    projDrawings.value = d.data
+    projTree.value = t.data
     projSets.value = s.data
-    // 常用范围为空时自动切全部（避免误以为没图纸）
-    if (!showAllDrawings.value && !d.data.length) {
-      const { data: all } = await projectsApi.drawings(activeProjectId.value, 'all')
-      if (all.length) {
-        showAllDrawings.value = true
-        projDrawings.value = all
-      }
-    }
   } catch { /* 静默 */ }
 }
 
@@ -635,22 +677,6 @@ async function applyProjectDrawings(withSummary) {
 function applySet(s) {
   selectedDrawingIds.value = [...s.drawing_ids]
   applyProjectDrawings(true)
-}
-
-// 存为图纸集（成员可建，项目共享）
-async function saveAsSet() {
-  try {
-    const { value } = await ElMessageBox.prompt('给这组图纸起个名字（如：桩基一套）', '存为图纸集', {
-      confirmButtonText: '保存', cancelButtonText: '取消',
-      inputValidator: (v) => (v && v.trim()) ? true : '名称不能为空',
-    })
-    await projectsApi.createSet(activeProjectId.value, {
-      name: value.trim(), drawing_ids: selectedDrawingIds.value,
-    })
-    ElMessage.success('图纸集已保存，项目成员共享可见')
-    const { data } = await projectsApi.sets(activeProjectId.value)
-    projSets.value = data
-  } catch { /* 用户取消 */ }
 }
 
 // 右侧Tab
@@ -1626,6 +1652,16 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   color: #909399;
+}
+.dg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  margin-top: 4px;
+  cursor: pointer;
+  border-bottom: 1px solid #f2f3f5;
+  user-select: none;
 }
 .sheet-item {
   display: flex;

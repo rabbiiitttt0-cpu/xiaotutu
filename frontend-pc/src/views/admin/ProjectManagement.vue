@@ -149,6 +149,25 @@
             </el-table>
           </template>
           <el-empty v-if="!drawings.length && !drawingsLoading && !hasDirs" description="尚未上传图纸" :image-size="60" />
+
+          <!-- 图纸集管理（预设常用组合，仅管理员可维护；识图助手端项目共享可见） -->
+          <el-divider content-position="left">图纸集</el-divider>
+          <div style="display: flex; justify-content: flex-end; margin-bottom: 8px">
+            <el-button size="small" type="primary" plain :disabled="!drawings.length" @click="openSetDialog()">
+              新建图纸集
+            </el-button>
+          </div>
+          <el-empty v-if="!projSets.length" description="暂无图纸集，可预设常用图纸组合（如：桩基一套）" :image-size="50" />
+          <div v-for="s in projSets" :key="s.id" class="set-row">
+            <span class="set-name" :title="s.name">{{ s.name }}</span>
+            <el-tag size="small" type="warning" effect="plain">{{ s.drawing_ids.length }} 张</el-tag>
+            <el-button size="small" text type="primary" @click="openSetDialog(s)">编辑</el-button>
+            <el-popconfirm title="删除该图纸集？（不影响图纸本身）" width="220" @confirm="removeSet(s)">
+              <template #reference>
+                <el-button size="small" text type="danger">删除</el-button>
+              </template>
+            </el-popconfirm>
+          </div>
         </el-tab-pane>
 
         <!-- ===== 成员 ===== -->
@@ -179,6 +198,40 @@
         </el-tab-pane>
       </el-tabs>
     </el-drawer>
+
+    <!-- 图纸集编辑对话框（勾选组成图纸集，仅 ready 图纸可选） -->
+    <el-dialog
+      v-model="setDialogVisible" :title="setForm.id ? '编辑图纸集' : '新建图纸集'"
+      width="520px" destroy-on-close
+    >
+      <el-form label-width="80px">
+        <el-form-item label="名称" required>
+          <el-input v-model="setForm.name" placeholder="如：桩基一套" maxlength="100" show-word-limit />
+        </el-form-item>
+        <el-form-item label="选择图纸">
+          <el-tree
+            ref="setTreeRef" :data="setTreeData" node-key="key" show-checkbox default-expand-all
+            :default-checked-keys="setForm.id ? editingSetCheckedKeys : []"
+            :props="{ label: 'name', children: 'children', disabled: 'disabled' }"
+            style="width: 100%; max-height: 320px; overflow-y: auto"
+          >
+            <template #default="{ data }">
+              <span style="font-size: 13px; display: flex; align-items: center; gap: 6px">
+                <el-icon v-if="data.type === 'dir'" :size="14" style="color: #e6a23c"><Folder /></el-icon>
+                <span>{{ data.filename || data.name }}</span>
+                <el-tag v-if="data.type === 'file' && data.status !== 'ready'" size="small" type="info">
+                  {{ statusText(data.status) }}
+                </el-tag>
+              </span>
+            </template>
+          </el-tree>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="setDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="setSaving" @click="saveSet">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -251,6 +304,7 @@ function openDetail(row) {
   loadDrawings()
   loadMembers()
   loadAllUsers()
+  loadSets()
 }
 
 // ----- 图纸 -----
@@ -338,6 +392,71 @@ async function removeDrawing(row) {
     ElMessage.success('已删除')
     loadDrawings()
     loadProjects()
+    loadSets()  // 后端会同步清理图纸集引用，刷新集内张数
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+// ----- 图纸集（预设常用组合，仅管理员维护） -----
+const projSets = ref([])
+const setDialogVisible = ref(false)
+const setSaving = ref(false)
+const setForm = ref({ id: 0, name: '' })
+const editingSetCheckedKeys = ref([])   // 编辑时回填的勾选 key（对话框 destroy-on-close 每次重挂载生效）
+const setTreeRef = ref()
+
+// 图纸树映射：目录禁用勾选（避免级联误选未就绪图纸），未 ready 文件禁用
+const setTreeData = computed(() => {
+  const mark = (nodes) => nodes.map(n => n.type === 'dir'
+    ? { ...n, disabled: true, children: mark(n.children || []) }
+    : { ...n, disabled: n.status !== 'ready' })
+  return mark(treeData.value)
+})
+
+async function loadSets() {
+  if (!current.value) return
+  try {
+    const { data } = await projectsApi.sets(current.value.id)
+    projSets.value = data
+  } catch { /* 静默 */ }
+}
+
+function openSetDialog(s) {
+  setForm.value = { id: s?.id || 0, name: s?.name || '' }
+  editingSetCheckedKeys.value = (s?.drawing_ids || []).map(id => `f-${id}`)
+  setDialogVisible.value = true
+}
+
+async function saveSet() {
+  const name = setForm.value.name.trim()
+  if (!name) { ElMessage.warning('请输入图纸集名称'); return }
+  const ids = setTreeRef.value.getCheckedKeys()
+    .filter(k => String(k).startsWith('f-'))
+    .map(k => Number(String(k).slice(2)))
+  if (!ids.length) { ElMessage.warning('请至少勾选一张图纸'); return }
+  setSaving.value = true
+  try {
+    if (setForm.value.id) {
+      await projectsApi.updateSet(current.value.id, setForm.value.id, { name, drawing_ids: ids })
+    } else {
+      await projectsApi.createSet(current.value.id, { name, drawing_ids: ids })
+    }
+    ElMessage.success('图纸集已保存')
+    setDialogVisible.value = false
+    loadSets()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    setSaving.value = false
+  }
+}
+
+async function removeSet(s) {
+  try {
+    await projectsApi.removeSet(current.value.id, s.id)
+    ElMessage.success('已删除')
+    loadSets()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || e.message)
   }
@@ -391,4 +510,20 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
 <style scoped>
 .page-header { margin-bottom: 16px; }
 .page-header h2 { margin: 0; font-size: 20px; }
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #f2f3f5;
+}
+.set-row .set-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
 </style>

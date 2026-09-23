@@ -3,7 +3,7 @@
   <div v-else class="app-shell">
     <!-- 侧边栏 -->
     <aside class="sidebar">
-      <div class="sidebar-header">
+      <div class="sidebar-header" @click="showLogoMenu = true" style="cursor: pointer;">
         <img src="/sidebar-logo.png" class="sidebar-logo" />
         <span class="sidebar-title">看图兔</span>
       </div>
@@ -72,6 +72,47 @@
       </template>
     </el-dialog>
 
+    <!-- logo 菜单弹窗 -->
+    <el-dialog
+      v-model="showLogoMenu"
+      title="看图兔"
+      width="300px"
+      :close-on-click-modal="true"
+      align-center
+    >
+      <div class="logo-menu-list">
+        <div class="logo-menu-item" @click="switchToMobile">
+          <el-icon><Iphone /></el-icon>
+          <span>切换为手机端</span>
+        </div>
+        <div class="logo-menu-item" @click="showAccountInfo = true; showLogoMenu = false">
+          <el-icon><User /></el-icon>
+          <span>账号信息</span>
+        </div>
+        <div class="logo-menu-item" @click="pwdDialogVisible = true; showLogoMenu = false">
+          <el-icon><Key /></el-icon>
+          <span>修改密码</span>
+        </div>
+        <div class="logo-menu-item danger" @click="handleLogout">
+          <el-icon><SwitchButton /></el-icon>
+          <span>退出登录</span>
+        </div>
+      </div>
+    </el-dialog>
+
+    <!-- 账号信息弹窗 -->
+    <el-dialog
+      v-model="showAccountInfo"
+      title="账号信息"
+      width="320px"
+      align-center
+    >
+      <el-descriptions :column="1" border>
+        <el-descriptions-item label="用户名">{{ authStore.displayName || authStore.username }}</el-descriptions-item>
+        <el-descriptions-item label="角色">{{ authStore.isSuperAdmin ? '管理员' : '成员' }}</el-descriptions-item>
+      </el-descriptions>
+    </el-dialog>
+
     <!-- 主内容区 -->
     <main class="main-content">
       <router-view v-slot="{ Component }">
@@ -87,6 +128,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Iphone, User, Key, SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from './stores/auth'
 import { auth } from './api'
 
@@ -95,6 +137,14 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const isLoginPage = computed(() => route.path === '/login')
+
+// logo 菜单
+const showLogoMenu = ref(false)
+const showAccountInfo = ref(false)
+
+function switchToMobile() {
+  window.location.href = '/mobile'
+}
 
 const menus = computed(() => [
   { path: '/drawing-review', label: '识图助手', icon: 'Crop' },
@@ -213,6 +263,23 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .user-actions { display: flex; gap: 14px; }
 .action-item { font-size: 13px; color: rgba(255,255,255,0.7); cursor: pointer; }
 .action-item:hover { color: #fff; }
+
+/* logo 菜单 */
+.logo-menu-list { display: flex; flex-direction: column; gap: 4px; }
+.logo-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #333;
+  transition: background 0.15s;
+}
+.logo-menu-item:hover { background: #f5f7fa; }
+.logo-menu-item.danger { color: #f56c6c; }
+.logo-menu-item.danger:hover { background: #fef0f0; }
 
 .main-content {
   flex: 1;

@@ -173,6 +173,7 @@ export const projects = {
   drawingInfo: (id, did) => api.get(`/projects/${id}/drawings/${did}/info`),
   sets: (id) => api.get(`/projects/${id}/sets`),
   createSet: (id, data) => api.post(`/projects/${id}/sets`, data),
+  updateSet: (id, sid, data) => api.put(`/projects/${id}/sets/${sid}`, data),
   removeSet: (id, sid) => api.delete(`/projects/${id}/sets/${sid}`),
   sessions: (id) => api.get(`/projects/${id}/sessions`),
   getSession: (id, sid) => api.get(`/projects/${id}/sessions/${sid}`),
