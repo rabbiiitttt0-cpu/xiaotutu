@@ -622,8 +622,7 @@ def _sheet_text_context(info: dict, question: str = "", budget: int = 12000) -> 
     """单图幅文本上下文（替代 description[:3000] 硬截断——description 图层列表在最前，
     图层 >~40 的图文字标注 0 字进上下文，2026-09-24 边界测试 66 题暴露的 L3/L4 主因）。
     优先级：图框标题栏 → 问题检索命中 → 图签/图名类标注 → 去重标注顺序填充 → 图层/实体压缩行。
-    预算 12000 字/图：deepseek-flash 1M 上下文下 4 图幅全量文本也仅占 ~8%，
-    且重复内容命中 prompt 缓存；图层列表始终压缩（对理解图纸无价值）。
+    预算由 _sheet_budget 按选中图幅数动态分配（图少看细、图多保底）。
     对既有图纸缓存同样生效（不依赖重新预处理）。"""
     from services.drawing_service import _looks_title_block
     parts: list[str] = []
@@ -700,13 +699,24 @@ def _sheet_text_context(info: dict, question: str = "", budget: int = 12000) -> 
     return "\n".join(parts)
 
 
+def _sheet_budget(n_sheets: int) -> int:
+    """单图幅文本预算按选中图幅数动态分配：总池 48K 字均分，
+    单图上限 30000（只问 1 张时标注全文基本全进，看细），
+    下限 8000（图多兜底，不给图幅饿死）。
+    1张→30000 / 2张→24000 / 3张→16000 / 4张→12000（路由最多选 4 张）。"""
+    if n_sheets <= 0:
+        return 12000
+    return max(8000, min(30000, 48000 // n_sheets))
+
+
 def _set_text_context(selected: list[dict], question: str = "") -> str:
-    """选中图幅的结构化文本上下文（每图幅预算 12000 字，标注优先于图层列表）"""
+    """选中图幅的结构化文本上下文（预算按图幅数动态分配，标注优先于图层列表）"""
+    budget = _sheet_budget(len(selected))
     parts = []
     for s in selected:
         try:
             info = _load_context(s["file_id"])
-            body = _sheet_text_context(info, question)
+            body = _sheet_text_context(info, question, budget)
             extra = s.get("_routed_pages_text") or ""  # PDF 深页检索补充
             parts.append(f"=== 图幅：{s['filename']} ===\n{body}{extra}")
         except Exception:
