@@ -139,6 +139,7 @@ export const drawing = {
   image: (fileId) => api.get(`/drawing/${fileId}/image`, { responseType: 'blob' }),
   imageSvg: (fileId) => api.get(`/drawing/${fileId}/image?fmt=svg`, { responseType: 'blob' }),
   imageN: (fileId, n) => api.get(`/drawing/${fileId}/image/${n}`, { responseType: 'blob' }),
+  pages: (fileId) => api.get(`/drawing/${fileId}/pages`),
   usage: () => api.get('/drawing/usage'),
   createSet: (data) => api.post('/drawing/sets', data),
   getSet: (id) => api.get(`/drawing/sets/${id}`),

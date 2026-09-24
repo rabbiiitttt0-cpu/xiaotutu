@@ -287,13 +287,13 @@
           />
           <!-- 框选矩形 -->
           <div v-if="snipRect" class="snip-rect" :style="snipRectStyle" />
-          <!-- 多页翻页（PDF 多页图纸） -->
-          <div v-if="previewUrls.length > 1" class="pz-pager">
+          <!-- 多页翻页（PDF 多页 / 图框切片） -->
+          <div v-if="pageTotal > 1" class="pz-pager">
             <el-button size="small" circle :disabled="pageIdx <= 0" @click.stop="pageIdx--; resetZoom()">
               <el-icon><ArrowLeft /></el-icon>
             </el-button>
-            <span>{{ pageIdx + 1 }} / {{ previewUrls.length }}</span>
-            <el-button size="small" circle :disabled="pageIdx >= previewUrls.length - 1" @click.stop="pageIdx++; resetZoom()">
+            <span>{{ pageIdx + 1 }} / {{ pageTotal }}</span>
+            <el-button size="small" circle :disabled="pageIdx >= pageTotal - 1" @click.stop="pageIdx++; resetZoom()">
               <el-icon><ArrowRight /></el-icon>
             </el-button>
           </div>
@@ -530,7 +530,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { drawing as drawingApi, projects as projectsApi } from '../api'
 import TutorialOverlay from '../components/TutorialOverlay.vue'
@@ -744,6 +744,9 @@ const scale = ref(1)
 const pan = ref({ x: 0, y: 0 })
 const isDragging = ref(false)
 const pageIdx = ref(0)
+const pageTotal = ref(1)   // 预览总页数（/pages 接口）：_hi/总览 + 全部图框切片
+const currentPreviewFid = ref('')
+let loadingPages = new Set()
 const pzRef = ref(null)
 let dragStart = null
 
@@ -976,8 +979,12 @@ function _revokePreviews() {
 
 async function loadPreview(fid) {
   _revokePreviews()
+  currentPreviewFid.value = fid
+  loadingPages = new Set()
   svgUrl.value = ''
   previewMode.value = 'png'  // 默认 PNG，右上角按钮可切 SVG
+  pageIdx.value = 0
+  pageTotal.value = 1
   try {
     const { data } = await drawingApi.image(fid)
     previewUrls.value.push(URL.createObjectURL(data))
@@ -985,17 +992,40 @@ async function loadPreview(fid) {
     drawingApi.imageSvg(fid).then(({ data: svgData }) => {
       if (svgData.type.includes('svg')) svgUrl.value = URL.createObjectURL(svgData)
     }).catch(() => {})
-    // PDF 多页：继续探测第 2/3 页（404 即止）
-    for (let n = 2; n <= 3; n++) {
-      try {
-        const resp = await drawingApi.imageN(fid, n)
-        previewUrls.value.push(URL.createObjectURL(resp.data))
-      } catch { break }
-    }
+    // 多页（PDF 多页 / 多图框切片）：先取总页数，只预载前 3 页，其余翻页时懒加载
+    // （切片图可能几十页，全量预载会把浏览器内存打爆）
+    try {
+      const { data: p } = await drawingApi.pages(fid)
+      pageTotal.value = Math.max(1, p.count || 1)
+    } catch { pageTotal.value = 3 }  // 旧后端无 /pages 接口时退回原来的 3 页探测
+    await ensurePagesLoaded(Math.min(pageTotal.value, 3))
   } catch {
     previewUrls.value = []
   }
 }
+
+// 懒加载第 2..n 页：已加载的跳过，失败（404）记为末页收缩
+async function ensurePagesLoaded(n) {
+  for (let i = previewUrls.value.length + 1; i <= n; i++) {
+    if (loadingPages.has(i)) continue
+    loadingPages.add(i)
+    try {
+      const resp = await drawingApi.imageN(currentPreviewFid.value, i)
+      previewUrls.value.push(URL.createObjectURL(resp.data))
+    } catch {
+      pageTotal.value = Math.min(pageTotal.value, previewUrls.value.length)
+      loadingPages.delete(i)
+      break
+    }
+    loadingPages.delete(i)
+  }
+}
+
+// 翻页时提前 2 页预取，连续翻页不卡
+watch(pageIdx, (i) => {
+  if (!currentPreviewFid.value) return
+  ensurePagesLoaded(Math.min(pageTotal.value, i + 3))
+})
 
 async function loadUsage() {}  // 用量统计已移至「日志查询」页（仅超管）
 

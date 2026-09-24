@@ -284,6 +284,12 @@ async def drawing_image_n(file_id: str, n: int):
     return FileResponse(str(pngs[n - 1]), media_type="image/png")
 
 
+@router.get("/{file_id}/pages")
+async def drawing_pages(file_id: str):
+    """预览总页数（_hi/总览 + 图框切片），前端翻页器按此懒加载，免逐一 404 探测"""
+    return {"count": len(_png_paths(file_id))}
+
+
 @router.get("/list")
 async def list_drawings():
     """获取已上传图纸列表"""
