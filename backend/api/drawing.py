@@ -395,17 +395,34 @@ def _load_set(set_id: str) -> dict:
 
 def _sheet_card(info: dict) -> dict:
     """图幅目录卡：路由阶段的唯一依据（纯文本小摘要，便宜）。
-    摘要优先用图框标题栏文字（项目名称/专业/图名/图号/版本），其次正文开头。"""
+    图框标题栏 → 图签/图名类标注 → 正文开头（PDF）。
+    （旧实现 body=description 第3行起300字，恰好撞上图层列表，路由全程致盲——
+    2026-09-24 边界测试暴露）"""
+    from services.drawing_service import _looks_title_block
     tb = (info.get("title_block") or "").strip()
-    desc = info.get("description", "")
-    body = desc.split("\n", 2)[-1][:300] if desc else ""
-    summary = (f"图框：{tb[:250]}" if tb else "") + (f"｜{body}" if body else "")
+    bits = []
+    if tb:
+        bits.append("图框：" + tb[:250])
+    anns, seen = [], set()
+    for t in info.get("text_annotations") or []:
+        txt = (t.get("text") or "").strip()
+        if txt and txt not in seen:
+            seen.add(txt)
+            if _looks_title_block(txt):
+                anns.append(txt)
+    if anns:
+        bits.append("图签标注：" + "；".join(anns[:12])[:250])
+    if not bits:
+        desc = info.get("description", "")
+        body = desc.split("\n", 2)[-1][:300] if desc else ""
+        if body:
+            bits.append(body)
     return {
         "file_id": "",
         "filename": info.get("filename", ""),
         "doc_type": info.get("doc_type", "dxf"),
         "image_count": info.get("image_count", 0),
-        "summary": summary[:500],
+        "summary": "｜".join(bits)[:500],
     }
 
 
@@ -574,37 +591,234 @@ async def _route_sheets(sheets: list[dict], question: str, llm_service: "LLMServ
     return sheets[:3], "路由失败，默认取前3张"
 
 
-def _set_image_content(text: str, sheets: list[dict]) -> tuple[object, bool]:
-    """多图幅多模态 content：每张选中图幅取其第 1 页渲染图（≤4 张）"""
+def _set_image_content(text: str, sheets: list[dict], max_images: int = 8) -> tuple[object, bool]:
+    """多图幅多模态 content：先每张选中图幅的整图/首页，剩余预算按页轮转补
+    分页/切片（原实现只送每图第 1 页，PDF 深页路由与多图框切片的红利吃不到）"""
+    queues = [(ps, s["filename"]) for s in sheets
+              if (ps := _png_paths(s["file_id"]))]
+    if not queues:
+        return (text, False)
     content = [{"type": "text", "text": text}]
     attached = 0
-    for s in sheets:
-        pngs = _png_paths(s["file_id"])
-        if pngs and attached < 4:
-            b64 = base64.b64encode(pngs[0].read_bytes()).decode("ascii")
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
-            attached += 1
-    if attached:
-        return (content, True)
-    return (text, False)
+    idx = 0
+    while attached < max_images:
+        progressed = False
+        for ps, _fn in queues:
+            if idx < len(ps) and attached < max_images:
+                b64 = base64.b64encode(ps[idx].read_bytes()).decode("ascii")
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+                attached += 1
+                progressed = True
+        if not progressed:
+            break
+        idx += 1
+    if any(len(ps) > 1 for ps, _ in queues):
+        content[0]["text"] += ("\n\n附：图像按图幅分组附送，每幅依次为【整图/首页】→【后续分页或图框切片】"
+                               "；PDF 分页中可能含按你的问题检索出的相关深页。")
+    return (content, True)
 
 
-def _set_text_context(selected: list[dict]) -> str:
-    """选中图幅的结构化文本上下文（每张截断 3000 字）"""
+def _sheet_text_context(info: dict, question: str = "", budget: int = 3200) -> str:
+    """单图幅文本上下文（替代 description[:3000] 硬截断——description 图层列表在最前，
+    图层 >~40 的图文字标注 0 字进上下文，2026-09-24 边界测试 66 题暴露的 L3/L4 主因）。
+    优先级：图框标题栏 → 问题检索命中 → 图签/图名类标注 → 去重标注顺序填充 → 图层/实体压缩行。
+    对既有图纸缓存同样生效（不依赖重新预处理）。"""
+    from services.drawing_service import _looks_title_block
+    parts: list[str] = []
+    used = 0
+
+    def _add(line: str) -> bool:
+        nonlocal used
+        if used + len(line) > budget:
+            return False
+        parts.append(line)
+        used += len(line)
+        return True
+
+    tb = (info.get("title_block") or "").strip()
+    if tb:
+        _add(f"【图框标题栏】{tb[:400]}")
+
+    anns: list[str] = []
+    seen: set[str] = set()
+    counts: dict[str, int] = {}
+    for t in info.get("text_annotations") or []:
+        txt = (t.get("text") or "").strip()
+        if not txt:
+            continue
+        counts[txt] = counts.get(txt, 0) + 1
+        if txt not in seen:
+            seen.add(txt)
+            anns.append(txt)
+
+    def _fmt(txt: str) -> str:
+        n = counts.get(txt, 1)
+        return f"{txt}（×{n}）" if n > 1 else txt
+
+    if not anns:
+        # PDF 等无逐条标注的图：description 本身紧凑（图框+前若干页文字层），整段注入
+        desc = (info.get("description") or "").strip()
+        if desc:
+            _add(desc[:budget - used])
+        return "\n".join(parts)
+
+    injected: set[str] = set()
+    hits = _search_annotations(info, question, limit=40) if question else []
+    if hits:
+        total = len(info.get("text_annotations") or [])
+        _add(f"【与问题相关的标注】（从全量 {total} 条标注中检索命中 {len(hits)} 条）")
+        for h in hits:
+            if _add("- " + _fmt(h)):
+                injected.add(h)
+    tb_anns = [a for a in anns if a not in injected and _looks_title_block(a)]
+    if tb_anns:
+        _add("【图签/图名类标注】")
+        for a in tb_anns[:30]:
+            if _add("- " + _fmt(a)):
+                injected.add(a)
+    # 图层/实体压缩统计行（小且关键，先于顺序填充，防被挤掉）
+    layers = info.get("layers") or []
+    if layers:
+        names = "、".join(l.get("name", "") for l in layers[:12])
+        suffix = f" 等共{len(layers)}个" if len(layers) > 12 else f" 共{len(layers)}个"
+        _add(f"【图层】{names}{suffix}")
+    ec = info.get("entity_counts") or {}
+    if ec:
+        top = "、".join(f"{k}:{v}" for k, v in sorted(ec.items(), key=lambda x: -x[1])[:6])
+        _add(f"【实体统计】{top}")
+    n_rest = 0
+    rest = [a for a in anns if a not in injected]
+    for a in rest:
+        if not _add("- " + _fmt(a)):
+            break
+        n_rest += 1
+    omitted = len(rest) - n_rest
+    if omitted > 0:
+        _add(f"- …另有 {omitted} 种标注未注入（可按问题检索补充）")
+    return "\n".join(parts)
+
+
+def _set_text_context(selected: list[dict], question: str = "") -> str:
+    """选中图幅的结构化文本上下文（每图幅预算 3200 字，标注优先于图层列表）"""
     parts = []
     for s in selected:
         try:
             info = _load_context(s["file_id"])
-            parts.append(f"=== 图幅：{s['filename']} ===\n{info.get('description', '')[:3000]}")
+            body = _sheet_text_context(info, question)
+            extra = s.get("_routed_pages_text") or ""  # PDF 深页检索补充
+            parts.append(f"=== 图幅：{s['filename']} ===\n{body}{extra}")
         except Exception:
             continue
     return "\n\n".join(parts)
 
 
+def _pdf_route_pages(sheet: dict, question: str, project_id: int = 0,
+                     max_new_pages: int = 2, max_page_chars: int = 700) -> str:
+    """PDF 深页路由：全页文字层按问题检索 → 命中但未渲染的页按需补渲
+    （落盘 {file_id}_pN.png，_png_paths 自动纳入图像通道），返回命中页文本摘录
+    （项目模式先按项目对照表脱敏）。无文字层/无命中/非 PDF 返回 ""。
+    全页文字首次提取后缓存进 ctx（page_texts，脱敏态），后续问题免重复解析。"""
+    if sheet.get("doc_type") != "pdf" or not question:
+        return ""
+    file_id = sheet.get("file_id", "")
+    try:
+        info = _load_context(file_id)
+    except Exception:
+        return ""
+
+    cmap, pdir = None, None
+    if project_id:
+        from services import project_service
+        from services.mask_service import (
+            load_project_cipher, save_project_cipher, mask_text)
+        pdir = project_service.project_dir(project_id)
+        cmap = load_project_cipher(pdir)
+
+    def _locate_src() -> str | None:
+        if project_id:
+            from db.database import SessionLocal
+            from db.models.project import ProjectDrawing
+            db = SessionLocal()
+            try:
+                rec = db.query(ProjectDrawing).filter_by(
+                    cache_file_id=file_id, project_id=project_id).first()
+                if rec and rec.original_path and Path(rec.original_path).exists():
+                    return rec.original_path
+            finally:
+                db.close()
+        p = UPLOAD_DIR / f"{file_id}.pdf"
+        return str(p) if p.exists() else None
+
+    src = _locate_src()
+    page_texts = info.get("page_texts")
+    if page_texts is None:
+        if not src:
+            info["page_texts"] = []
+            _save_context(file_id, info)
+            return ""
+        try:
+            import fitz
+            doc = fitz.open(src)
+            page_texts = [(pg.get_text("text") or "").strip()[:max_page_chars] for pg in doc]
+            info["page_total"] = len(doc)
+            doc.close()
+        except Exception:
+            return ""
+        if cmap:
+            page_texts = [mask_text(t, cmap) if t else t for t in page_texts]
+            save_project_cipher(pdir, cmap)  # 页文本可能引入新实体，回写对照表
+        info["page_texts"] = page_texts
+        _save_context(file_id, info)
+    if not page_texts:
+        return ""
+
+    # 二字滑窗打分（与 _search_annotations 同策略）
+    qq = re.sub(r"\s+", "", question)
+    bigrams = {qq[i:i + 2] for i in range(len(qq) - 1)} - _ANNO_STOP
+    scored = []
+    for i, t in enumerate(page_texts):
+        if not t:
+            continue
+        hit = sum(1 for b in bigrams if b in t)
+        if hit:
+            scored.append((hit, i))
+    scored.sort(key=lambda x: -x[0])
+    picked = sorted(i + 1 for _, i in scored[:3])  # 1-based，按页码顺序注入
+    if not picked:
+        return ""
+
+    # 命中页里超出已渲染范围的，按需补渲（首轮 max_pages 页之外）
+    if src:
+        from services.drawing_service import PDF_RENDER_DPI
+        import fitz
+        new_pages = 0
+        for pg in picked:
+            png = UPLOAD_DIR / f"{file_id}_p{pg}.png"
+            if png.exists() or new_pages >= max_new_pages:
+                continue
+            try:
+                doc = fitz.open(src)
+                page = doc[pg - 1]
+                page.get_pixmap(matrix=fitz.Matrix(PDF_RENDER_DPI / 72,
+                                                   PDF_RENDER_DPI / 72)).save(str(png))
+                doc.close()
+                new_pages += 1
+            except Exception:
+                continue
+
+    total = info.get("page_total") or len(page_texts)
+    parts = [f"\n\n【深页检索】本图共 {total} 页，按问题命中第 {'、'.join(map(str, picked))} 页："]
+    for pg in picked:
+        t = page_texts[pg - 1] if pg - 1 < len(page_texts) else ""
+        if t:
+            parts.append(f"── 第{pg}页 ──\n{t}")
+    return "\n".join(parts)
+
+
 async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
                         prompt_builder, temperature: float, max_tokens: int,
                         snip_image: str = "", history: list | None = None):
-    """图纸集 LLM 调用公共流程：路由(>3张)→文本上下文+图→调用→记用量。
+    """图纸集 LLM 调用公共流程：路由(>3张)→PDF深页检索→文本上下文+图→调用→记用量。
     prompt_builder(kind_cn, names, ctx) -> system_prompt"""
     srec = _load_set(req_set_id)
     sheets = srec.get("sheets", [])
@@ -619,7 +833,17 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
     else:
         selected, route_reason = await _route_sheets(sheets, question, llm_service, pidx)
 
-    ctx = _set_text_context(selected)
+    # PDF 深页路由：按问题检索全页文字层，命中页补渲染 + 文本摘录注入上下文
+    proj_id = srec.get("project_id") or 0
+    for s in selected:
+        try:
+            extra = _pdf_route_pages(s, question, proj_id)
+            if extra:
+                s["_routed_pages_text"] = extra
+        except Exception:
+            pass  # 深页检索失败不阻断主问答
+
+    ctx = _set_text_context(selected, question)
     # 图纸集总览（含图幅关系描述）注入，辅助跨图纸关系推理
     set_summary = (srec.get("set_summary") or "").strip()
     if set_summary:
