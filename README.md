@@ -89,6 +89,12 @@ docker compose -p xiaotutu up -d
 - 下载/预览一律走鉴权接口，不裸开 URL
 - `data/`、`.env`、`*.pem` 均已 gitignore
 
+## 文档
+
+- [部署指南](docs/部署指南.md) —— Docker Compose / 本地开发 / 域名 HTTPS / 备份升级
+- [使用说明](docs/使用说明.md) —— 角色权限、上传问答全流程、脱敏、图纸集
+- [常见问题](docs/常见问题.md) —— 部署故障、图纸处理失败、401/413、语音输入等 17 条排障
+
 ## 许可
 
-MIT License（见 LICENSE）
+MIT License（见 LICENSE）。仓库捆绑的 LibreDWG 二进制为 [GPL 许可](https://www.gnu.org/licenses/gpl.html)的独立组件（说明见 `assets/bin/libredwg/README.txt`），其版权归属 GNU LibreDWG 项目。

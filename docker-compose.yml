@@ -1,4 +1,4 @@
-# ===== 看图兔 生产编排（compose 项目名 -p xiaotutu，与同舟智航隔离）=====
+# ===== 看图兔 生产编排（compose 项目名 -p xiaotutu）=====
 services:
   db:
     image: postgres:16-alpine
