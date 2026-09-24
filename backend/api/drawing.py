@@ -618,10 +618,12 @@ def _set_image_content(text: str, sheets: list[dict], max_images: int = 8) -> tu
     return (content, True)
 
 
-def _sheet_text_context(info: dict, question: str = "", budget: int = 3200) -> str:
+def _sheet_text_context(info: dict, question: str = "", budget: int = 12000) -> str:
     """单图幅文本上下文（替代 description[:3000] 硬截断——description 图层列表在最前，
     图层 >~40 的图文字标注 0 字进上下文，2026-09-24 边界测试 66 题暴露的 L3/L4 主因）。
     优先级：图框标题栏 → 问题检索命中 → 图签/图名类标注 → 去重标注顺序填充 → 图层/实体压缩行。
+    预算 12000 字/图：deepseek-flash 1M 上下文下 4 图幅全量文本也仅占 ~8%，
+    且重复内容命中 prompt 缓存；图层列表始终压缩（对理解图纸无价值）。
     对既有图纸缓存同样生效（不依赖重新预处理）。"""
     from services.drawing_service import _looks_title_block
     parts: list[str] = []
@@ -699,7 +701,7 @@ def _sheet_text_context(info: dict, question: str = "", budget: int = 3200) -> s
 
 
 def _set_text_context(selected: list[dict], question: str = "") -> str:
-    """选中图幅的结构化文本上下文（每图幅预算 3200 字，标注优先于图层列表）"""
+    """选中图幅的结构化文本上下文（每图幅预算 12000 字，标注优先于图层列表）"""
     parts = []
     for s in selected:
         try:
