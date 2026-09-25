@@ -560,6 +560,8 @@ const setId = ref('')
 const sheets = ref([])
 const activeSheetId = ref('')
 
+// 是否有可用图纸上下文（图纸集或单图；项目模式应用图纸后同样会设置二者之一）
+const hasContext = computed(() => !!setId.value || !!fileId.value)
 // ===== 项目图纸模式：状态 =====
 
 const sourceMode = ref('upload')        // upload 本地上传 | project 项目图纸
