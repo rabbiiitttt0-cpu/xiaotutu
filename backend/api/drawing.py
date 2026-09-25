@@ -1388,6 +1388,55 @@ def _parse_materials_json(result: str) -> list:
     return [{"name": "解析异常", "spec": "-", "unit": "-", "layer": "-", "note": result}]
 
 
+# ==================== 语音识别（MiMo ASR） ====================
+
+@router.post("/asr")
+async def drawing_asr(file: UploadFile = File(...), user: User = Depends(get_current_user)):
+    """语音转文字：前端录 wav/mp3 上传，转发小米 MiMo ASR，返回识别文本。
+
+    MiMo ASR 走 OpenAI 兼容 chat/completions（input_audio base64，≤10MB 编码后）。
+    TokenPlan key（tp-）需配 token-plan 集群 base_url，见 config.AsrSettings。
+    """
+    asr_cfg = load_config().asr
+    if not asr_cfg.api_key:
+        raise HTTPException(status_code=400, detail="语音识别未配置 API Key（data/app_config.json → asr.api_key）")
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=400, detail="空音频")
+    b64 = base64.b64encode(audio).decode("ascii")
+    if len(b64) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="音频过大（编码后超过 10MB），请缩短录音")
+    fname = (file.filename or "").lower()
+    fmt = "mp3" if fname.endswith(".mp3") else "wav"
+    payload = {
+        "model": asr_cfg.model,
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "input_audio", "input_audio": {
+                "data": f"data:audio/{fmt};base64,{b64}"}}],
+        }],
+        "asr_options": {"language": asr_cfg.language},
+    }
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as cli:
+            r = await cli.post(
+                f"{asr_cfg.base_url.rstrip('/')}/chat/completions",
+                headers={"api-key": asr_cfg.api_key,
+                         "Authorization": f"Bearer {asr_cfg.api_key}"},
+                json=payload)
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"语音识别服务返回 {r.status_code}：{r.text[:200]}")
+        data = r.json()
+        text = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        _record_usage("asr", False, data.get("usage"))
+        return {"text": text.strip()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"语音识别调用失败：{type(e).__name__}")
+
+
 # ==================== 用量统计 ====================
 
 @router.get("/usage")

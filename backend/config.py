@@ -44,6 +44,14 @@ class LLMProviderConfig(BaseModel):
     thinking_effort: str = "off"
 
 
+class AsrSettings(BaseModel):
+    """语音识别（ASR）设置——默认小米 MiMo TokenPlan 集群"""
+    api_key: str = ""
+    base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
+    model: str = "mimo-v2.5-asr"
+    language: str = "zh"  # auto/zh/en
+
+
 class AppConfig(BaseModel):
     """应用全局配置"""
     providers: list[LLMProviderConfig] = Field(default_factory=lambda: [
@@ -56,6 +64,7 @@ class AppConfig(BaseModel):
     # 识图助手使用的 provider 索引
     drawing_provider_index: int = 0
     agent_settings: AgentSettings = AgentSettings()
+    asr: AsrSettings = AsrSettings()
 
 
 def load_config() -> AppConfig:

@@ -370,14 +370,15 @@
                 resize="none"
                 class="chat-textarea"
               />
-              <el-tooltip content="语音输入（中文）" placement="top">
+              <el-tooltip content="语音输入（说话后再次点击结束）" placement="top">
                 <el-button
                   class="voice-btn" :class="{ recording: recognizing }"
                   :type="recognizing ? 'danger' : 'info'" circle plain
+                  :loading="voiceUploading"
                   :disabled="!hasContext || chatLoading"
                   @click="toggleVoice"
                 >
-                  <el-icon><Microphone /></el-icon>
+                  <el-icon v-if="!voiceUploading"><Microphone /></el-icon>
                 </el-button>
               </el-tooltip>
               <el-button
@@ -533,6 +534,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { drawing as drawingApi, projects as projectsApi } from '../api'
+import { WavRecorder } from '../utils/wavRecorder'
 import TutorialOverlay from '../components/TutorialOverlay.vue'
 
 const tutorialRef = ref(null)
@@ -941,34 +943,46 @@ async function doSnipCrop() {
   } catch { /* 裁剪失败静默 */ }
 }
 
-// ==================== 语音输入（浏览器 SpeechRecognition，中文） ====================
+// ==================== 语音输入（麦克风录音 → MiMo ASR 服务端识别） ====================
 
 const recognizing = ref(false)
-let recognizer = null
-let voiceBaseText = ''
+const voiceUploading = ref(false)
+let wavRecorder = null
 
-function toggleVoice() {
-  if (recognizing.value) { recognizer?.stop(); return }
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!SR) { ElMessage.warning('当前浏览器不支持语音识别，请用 Chrome/Edge'); return }
-  recognizer = new SR()
-  recognizer.lang = 'zh-CN'
-  recognizer.continuous = true
-  recognizer.interimResults = true
-  let finals = ''
-  recognizer.onresult = (e) => {
-    let interim = ''
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) finals += e.results[i][0].transcript
-      else interim += e.results[i][0].transcript
+async function toggleVoice() {
+  if (recognizing.value) {
+    // 停止录音 → 上传识别
+    recognizing.value = false
+    let blob = null
+    try { blob = await wavRecorder?.stop() } catch { /* 编码失败静默 */ }
+    wavRecorder = null
+    if (!blob) { ElMessage.warning('没有录到声音'); return }
+    voiceUploading.value = true
+    try {
+      const { data } = await drawingApi.asr(new File([blob], 'voice.wav', { type: 'audio/wav' }))
+      if (data.text) {
+        question.value = question.value ? question.value + data.text : data.text
+        ElMessage.success('语音已识别')
+      } else {
+        ElMessage.warning('未识别到语音内容，请靠近麦克风重试')
+      }
+    } catch (e) {
+      ElMessage.error(e?.response?.data?.detail || '语音识别失败')
+    } finally {
+      voiceUploading.value = false
     }
-    question.value = voiceBaseText + finals + interim
+    return
   }
-  recognizer.onend = () => { recognizing.value = false }
-  recognizer.onerror = () => { recognizing.value = false }
-  voiceBaseText = question.value
-  recognizer.start()
-  recognizing.value = true
+  try {
+    wavRecorder = new WavRecorder(60)
+    wavRecorder.onMaxReached = () => { if (recognizing.value) toggleVoice() } // 60s 自动停止
+    await wavRecorder.start()
+    recognizing.value = true
+    ElMessage.info('录音中…再点一次结束')
+  } catch {
+    wavRecorder = null
+    ElMessage.warning('无法使用麦克风，请检查浏览器权限（需 HTTPS 或 localhost）')
+  }
 }
 
 function _revokePreviews() {

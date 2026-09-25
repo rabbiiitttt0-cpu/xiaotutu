@@ -145,6 +145,13 @@ export const drawing = {
   removeSheet: (setId, fileId) => api.delete(`/drawing/sets/${setId}/sheets/${fileId}`),
   saveSetSummary: (id, data) => api.put(`/drawing/sets/${id}/summary`, data),
   projectSet: (data) => api.post('/drawing/project_set', data),
+  asr: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return llmApi.post('/drawing/asr', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
 }
 
 // ===== 项目图纸（成员） =====

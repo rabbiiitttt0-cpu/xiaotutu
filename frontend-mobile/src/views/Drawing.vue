@@ -81,7 +81,8 @@
                 :border="false"
                 @keyup.enter="sendQuestion"
               />
-              <van-button size="small" type="primary" icon="service-o" @click="toggleVoice" />
+              <van-button size="small" :type="recognizing ? 'danger' : 'primary'"
+                icon="service-o" :loading="voiceUploading" @click="toggleVoice" />
               <van-button size="small" type="primary" :loading="chatLoading" @click="sendQuestion">发送</van-button>
             </div>
           </div>
@@ -262,6 +263,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { showToast, showSuccessToast } from 'vant'
 import { drawing as drawingApi, projects as projectsApi } from '../api'
+import { WavRecorder } from '../utils/wavRecorder'
 import { auth as authApi } from '../api/auth'
 import { useAuthStore } from '../stores/auth'
 
@@ -626,29 +628,43 @@ async function generateBriefing() {
   }
 }
 
-// 语音输入（浏览器 SpeechRecognition）
-let recognizer = null
-let voiceBaseText = ''
-function toggleVoice() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!SR) { showToast('浏览器不支持语音，请用 Chrome'); return }
-  if (recognizer) { recognizer.stop(); recognizer = null; return }
-  recognizer = new SR()
-  recognizer.lang = 'zh-CN'
-  recognizer.continuous = true
-  recognizer.interimResults = true
-  let finals = ''
-  recognizer.onresult = (e) => {
-    let interim = ''
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) finals += e.results[i][0].transcript
-      else interim += e.results[i][0].transcript
+// 语音输入（麦克风录音 → MiMo ASR 服务端识别）
+const recognizing = ref(false)
+const voiceUploading = ref(false)
+let wavRecorder = null
+async function toggleVoice() {
+  if (recognizing.value) {
+    recognizing.value = false
+    let blob = null
+    try { blob = await wavRecorder?.stop() } catch { /* 编码失败静默 */ }
+    wavRecorder = null
+    if (!blob) { showToast('没有录到声音'); return }
+    voiceUploading.value = true
+    try {
+      const { data } = await drawingApi.asr(new File([blob], 'voice.wav', { type: 'audio/wav' }))
+      if (data.text) {
+        question.value = question.value ? question.value + data.text : data.text
+        showSuccessToast('已识别')
+      } else {
+        showToast('未识别到语音，请靠近麦克风重试')
+      }
+    } catch (e) {
+      showToast(e?.response?.data?.detail || '语音识别失败')
+    } finally {
+      voiceUploading.value = false
     }
-    question.value = voiceBaseText + finals + interim
+    return
   }
-  recognizer.onend = () => { recognizer = null }
-  voiceBaseText = question.value
-  recognizer.start()
+  try {
+    wavRecorder = new WavRecorder(60)
+    wavRecorder.onMaxReached = () => { if (recognizing.value) toggleVoice() } // 60s 自动停止
+    await wavRecorder.start()
+    recognizing.value = true
+    showToast('录音中…再点一次结束')
+  } catch {
+    wavRecorder = null
+    showToast('无法使用麦克风，请检查权限')
+  }
 }
 
 // 触摸手势（单指拖动 + 双指捏合缩放 + 单指滑动翻页 + 框选截图）
