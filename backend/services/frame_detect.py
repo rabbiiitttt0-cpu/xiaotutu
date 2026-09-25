@@ -29,6 +29,7 @@
 import logging
 import math
 import re
+import time
 from pathlib import Path
 
 logger = logging.getLogger("app")
@@ -53,8 +54,9 @@ TITLE_KEYWORDS = (
 
 # ---- 切片渲染 ----
 SLICE_PX_PER_UNIT = 6.5      # 切片画布目标精度（单位≈mm 时 ≈165dpi）
-SLICE_MAX_EDGE = 8000        # 画布长边像素上限（A0 也扛得住）
-VIEW_PAD = 0.04              # 渲染视野 = 图框并集外扩 4%
+FRAME_MAX_EDGE = 4096        # 单帧长边像素上限（逐帧独立渲染，2026-09-25 起）
+VIEW_PAD = 0.04              # 渲染视野 = 图框并集外扩 4%（仅 OCR 估计用）
+FRAME_PAD = 0.008            # 单帧视野外扩比例（保住图框边线）
 
 
 def _load_doc(dxf_path: str):
@@ -346,15 +348,29 @@ def _union_view(frames: list[tuple]) -> tuple[float, float, float, float]:
     return (x0 - pw, y0 - ph, x1 + pw, y1 + ph)
 
 
-def _render_and_crop(doc, frames: list[tuple], out_stem: str,
-                     view: tuple[float, float, float, float]) -> list[str]:
-    """受控渲染视野一次 → 按帧世界坐标精确裁剪。
+def _entity_boxes(msp) -> dict:
+    """整图实体包围盒预计算（一次/图，fast 近似 + 块缓存）。
+    求不出 bbox 的实体记 None → 渲染时保守放行，绝不因过滤丢内容。"""
+    from ezdxf import bbox
+    cache = bbox.Cache()
+    boxes = {}
+    for e in msp:
+        try:
+            b = bbox.extents([e], fast=True, cache=cache)
+            boxes[id(e)] = b if b.has_data else None
+        except Exception:
+            boxes[id(e)] = None
+    return boxes
 
-    世界→像素映射不再依赖手工 set_xlim/ylim 的假设：绘制完成后直接读
-    ax.transData（matplotlib 实际生效的变换，aspect 调整免疫），
-    再按画布像素/显示像素比例换算，裁剪零漂移。
+
+def _render_frame(doc, frame: tuple, out_path: str, boxes: dict | None = None) -> bool:
+    """单个图框独立画布渲染成 PNG（一帧一画布，分辨率不随图框数量摊薄）。
+
+    世界→像素直接由视野尺寸 × SLICE_PX_PER_UNIT 决定，长边封顶 FRAME_MAX_EDGE。
+    dpi 固定 100（低 dpi 触发 FreeType "invalid ppem"）；ezdxf finalize 会按内容
+    范围重置画布尺寸，绘制后必须夺回 figsize。
+    boxes 提供时按视野过滤实体（只画框内实体，密集大图逐帧渲染的耗时关键）。
     """
-    from PIL import Image
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -367,62 +383,75 @@ def _render_and_crop(doc, frames: list[tuple], out_stem: str,
     from services.drawing_service import apply_cjk_fonts
     apply_cjk_fonts(doc)
 
-    vw, vh = view[2] - view[0], view[3] - view[1]
+    x0, y0, x1, y1 = frame
+    vw, vh = x1 - x0, y1 - y0
     if vw <= 0 or vh <= 0:
-        return []
-    # 画布像素直接定死（与图纸单位解耦）：低 dpi 会触发 FreeType "invalid
-    # ppem" 字体错误（曾致 1×1 画布），故 dpi 固定 100，figsize=像素/100
-    h_px = min(SLICE_MAX_EDGE, max(64, round(vh * SLICE_PX_PER_UNIT)))
+        return False
+    h_px = min(FRAME_MAX_EDGE, max(64, round(vh * SLICE_PX_PER_UNIT)))
     w_px = max(64, round(vw * (h_px / vh)))
-    if max(w_px, h_px) > SLICE_MAX_EDGE:
-        k = SLICE_MAX_EDGE / max(w_px, h_px)
+    if max(w_px, h_px) > FRAME_MAX_EDGE:
+        k = FRAME_MAX_EDGE / max(w_px, h_px)
         w_px, h_px = round(w_px * k), round(h_px * k)
     dpi = 100
     fig = plt.figure(figsize=(w_px / dpi, h_px / dpi), dpi=dpi)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_axis_off()
-    canvas = Path(out_stem + "_canvas_tmp.png")
+
+    filter_func = None
+    if boxes is not None:
+        def filter_func(e, _b=boxes, _v=(x0, y0, x1, y1)):
+            try:
+                b = _b.get(id(e))
+                if b is None:
+                    return True  # 无 bbox → 保守绘制
+                return not (b.extmax.x < _v[0] or b.extmin.x > _v[2]
+                            or b.extmax.y < _v[1] or b.extmin.y > _v[3])
+            except Exception:
+                return True
+
     try:
         ctx = RenderContext(doc)
         backend = MatplotlibBackend(ax)
         cfg = Configuration(background_policy=BackgroundPolicy.WHITE,
                             color_policy=ColorPolicy.BLACK)
-        Frontend(ctx, backend, config=cfg).draw_layout(doc.modelspace(), finalize=True)
-        # ezdxf finalize 会按内容范围重置画布尺寸（实测 67.7×80in → 4.4×4.8in），
-        # 必须夺回 figsize，否则分辨率跌到 441×480
+        Frontend(ctx, backend, config=cfg).draw_layout(
+            doc.modelspace(), finalize=True, filter_func=filter_func)
+        # finalize 会按内容范围重置画布尺寸（实测 67.7×80in → 4.4×4.8in），夺回
         fig.set_size_inches(w_px / dpi, h_px / dpi)
-        ax.set_xlim(view[0], view[2])
-        ax.set_ylim(view[1], view[3])
-        fig.canvas.draw()  # 让最终变换生效
-        trans = ax.transData
-        wf, hf = fig.canvas.get_width_height()
-        fig.savefig(str(canvas), dpi=dpi, facecolor="white")
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(y0, y1)
+        fig.canvas.draw()
+        fig.savefig(out_path, dpi=dpi, facecolor="white")
+        return True
     finally:
         plt.close(fig)
 
+
+def _render_and_crop(doc, frames: list[tuple], out_stem: str,
+                     view: tuple[float, float, float, float]) -> list[str]:
+    """逐帧独立渲染切片（每帧一张画布）。
+
+    2026-09-25 重构：旧实现把全部图框画进同一张 ≤8000px 长边的画布再按坐标裁剪，
+    图框横向一多（如实测 7 列）每帧只剩 ~1088px，A0/1:150 平面图上 DJj 级标注
+    不可读，模型被迫回退文本层脑补空间归属（办公楼 DJj03 误答 DJj08 事件）。
+    view 参数（图框并集）仅为兼容旧签名保留，不再使用。
+    """
     outs = []
-    try:
-        img = Image.open(canvas)
-        W, H = img.size
-        sx, sy = W / wf, H / hf
-        pad = 2  # 图框线有线宽，四周各外扩 2px 防切掉边线
-        for i, f in enumerate(frames, 1):
-            d0 = trans.transform((f[0], f[1]))
-            d1 = trans.transform((f[2], f[3]))
-            xlo, xhi = sorted((d0[0], d1[0]))
-            ylo, yhi = sorted((d0[1], d1[1]))
-            left = max(0, int(xlo * sx) - pad)
-            right = min(W, int(xhi * sx) + pad)
-            top = max(0, int((hf - yhi) * sy) - pad)
-            bot = min(H, int((hf - ylo) * sy) + pad)
-            if right - left < 4 or bot - top < 4:
-                continue
-            out = f"{out_stem}_p{i}.png"
-            img.crop((left, top, right, bot)).save(out, optimize=True)
-            outs.append(out)
-        img.close()
-    finally:
-        canvas.unlink(missing_ok=True)
+    t0 = time.time()
+    boxes = _entity_boxes(doc.modelspace())
+    logger.info("[图框切片] 实体包围盒预计算 %d 个，%.1fs", len(boxes), time.time() - t0)
+    for i, f in enumerate(frames, 1):
+        fw, fh = f[2] - f[0], f[3] - f[1]
+        if fw <= 0 or fh <= 0:
+            continue
+        px, py = fw * FRAME_PAD, fh * FRAME_PAD
+        out = f"{out_stem}_p{i}.png"
+        try:
+            if _render_frame(doc, (f[0] - px, f[1] - py, f[2] + px, f[3] + py),
+                             out, boxes):
+                outs.append(out)
+        except Exception as e:
+            logger.warning("[图框切片] 第 %d 帧渲染失败（跳过）: %s", i, e)
     return outs
 
 
