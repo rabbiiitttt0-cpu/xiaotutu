@@ -65,10 +65,51 @@ def _load_doc(dxf_path: str):
     from services.drawing_service import patch_ezdxf_acis_tolerance
     patch_ezdxf_acis_tolerance()
     try:
-        return ezdxf.readfile(dxf_path)
+        doc = ezdxf.readfile(dxf_path)
     except Exception:
         doc, _ = recover.readfile(dxf_path)
-        return doc
+    _sanitize_linetypes(doc)
+    return doc
+
+
+def _sanitize_linetypes(doc):
+    """空线型名兜底：部分图纸实体 linetype="" 且线型表无此定义，
+    matplotlib 后端解析时报 Linetype "" not defined 导致整帧渲染失败
+    （实测：室外管线总平面图采暖外网 全部帧失败）。统一改指 BYLAYER。"""
+    n = 0
+    try:
+        entities = doc.entitydb.values()
+    except Exception:
+        return
+    for e in entities:
+        try:
+            if e.dxf.hasattr("linetype") and e.dxf.linetype == "":
+                e.dxf.linetype = "BYLAYER"
+                n += 1
+        except Exception:
+            pass
+    if n:
+        logger.info("[图框检测] 空线型名修正 %d 个实体", n)
+
+    # MLINESTYLE 元素里的空线型名：MLINE 炸开成虚拟 LINE 时继承该线型，
+    # post_new_hook 校验报 Linetype "" not defined，整帧渲染失败
+    # （实测：室外管线总平面图采暖外网，样式元素藏在 entitydb 的 MLINESTYLE 对象里）。
+    m = 0
+    try:
+        for obj in doc.entitydb.values():
+            if obj.dxftype() != "MLINESTYLE":
+                continue
+            els = getattr(obj.elements, "elements", None)
+            if not isinstance(els, list):
+                continue
+            for i, el in enumerate(els):
+                if getattr(el, "linetype", None) == "":
+                    els[i] = el._replace(linetype="BYLAYER")
+                    m += 1
+    except Exception:
+        pass
+    if m:
+        logger.info("[图框检测] MLINESTYLE 空线型名修正 %d 处", m)
 
 
 def _rect_of(entity) -> tuple[float, float, float, float] | None:
