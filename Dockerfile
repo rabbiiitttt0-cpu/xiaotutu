@@ -6,9 +6,11 @@ WORKDIR /app
 
 # 系统依赖：fontconfig（CJK 字体）+ 编译工具 + curl
 # 国内构建：Debian 源换阿里云镜像
+# libxcb1/libgl1：rapidocr 依赖的 opencv-python（非 headless）运行时必需，
+# 缺失会导致 OCR 全链路静默失败（libxcb.so.1 报错，实测生产踩坑）
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ curl fontconfig \
+    gcc g++ curl fontconfig libxcb1 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 依赖
