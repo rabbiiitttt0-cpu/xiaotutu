@@ -274,6 +274,180 @@ def _worker_loop():
             logger.exception("[项目预处理] 图纸 %s 处理异常", drawing_id)
         finally:
             _task_queue.task_done()
+        # 画像/关系图后处理：锁外执行（LLM 网络调用不占渲染互斥），失败不影响 ready
+        try:
+            _post_process_drawing(drawing_id)
+        except Exception:
+            logger.exception("[画像] 后处理异常 drawing=%s", drawing_id)
+
+
+def _frames_meta(frames: list, masked_info: dict) -> list[dict]:
+    """切片图框元数据：rect（世界坐标，与 det["frames"]/切片同序）+ rect 内图签标注提取图名。
+    世界坐标经 rect 归属判定即可支撑"按图幅分组文字摘要"，无需渲染变换参数。"""
+    from services.drawing_service import _looks_title_block, _TB_TITLE_SUFFIX
+    anns = masked_info.get("text_annotations") or []
+    out = []
+    for i, rect in enumerate(frames, 1):
+        x0, y0, x1, y1 = rect
+        inside = []
+        for a in anns:
+            pos = a.get("position")
+            t = (a.get("text") or "").strip()
+            if not t or not pos:
+                continue
+            if x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1 and _looks_title_block(t):
+                inside.append(t)
+        title = ""
+        for t in inside:
+            if _TB_TITLE_SUFFIX.search(t):
+                title = t
+                break
+        if not title and inside:
+            title = inside[0]
+        out.append({"frame": f"p{i}", "rect": [round(float(v), 1) for v in rect],
+                    "title": title[:60]})
+    return out
+
+
+def _post_process_drawing(drawing_id: int):
+    """单图画像 + 批次完成自查触发关系图（worker 主进程侧，锁外）。
+    ProfileAgent 输入全走脱敏态（ctx 本就密文；文件名单独过项目对照表）。"""
+    import asyncio
+    from config import load_config
+    cfg = load_config()
+    if not cfg.agent_settings.profile_agent_enabled:
+        return
+    from db.database import SessionLocal
+    from db.models.project import ProjectDrawing
+    from services.llm_service import LLMService
+    from services.agents import profile as profile_agent
+    from services.mask_service import (
+        load_project_cipher, save_project_cipher, mask_text)
+
+    db = SessionLocal()
+    try:
+        rec = db.get(ProjectDrawing, drawing_id)
+        if not rec or rec.status != "ready" or not rec.cache_file_id:
+            return
+        pid, fid, filename = rec.project_id, rec.cache_file_id, rec.filename
+        busy = db.query(ProjectDrawing).filter(
+            ProjectDrawing.project_id == pid,
+            ProjectDrawing.status.in_(["pending", "processing"])).count()
+    finally:
+        db.close()
+
+    ctx_path = UPLOAD_DIR / f"{fid}.json"
+    try:
+        info = json.loads(ctx_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not info.get("summary"):
+        pdir = project_dir(pid)
+        cmap = load_project_cipher(pdir)
+        masked_name = mask_text(filename, cmap)
+        save_project_cipher(pdir, cmap)
+        try:
+            res = asyncio.run(profile_agent.summarize_drawing(
+                LLMService(), cfg.drawing_provider_index, info, masked_name))
+        except Exception:
+            logger.exception("[画像] 摘要生成失败 drawing=%s", drawing_id)
+            res = None
+        if res:
+            info["summary"] = res["summary"]
+            by_frame = {f.get("frame"): f for f in res.get("frame_summaries") or []}
+            for i, fr in enumerate(info.get("frames") or [], 1):
+                extra = by_frame.get(f"p{i}")
+                if extra:
+                    if extra.get("title") and not fr.get("title"):
+                        fr["title"] = extra["title"]
+                    if extra.get("summary"):
+                        fr["summary"] = extra["summary"]
+            tmp = ctx_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+            os.replace(str(tmp), str(ctx_path))
+            logger.info("[画像] 摘要完成 drawing=%s", drawing_id)
+
+    # 批次完成自查：该项目 0 pending/processing → 重建关系图（指纹变化时）
+    if busy == 0:
+        build_project_relations(pid)
+
+
+def _project_drawing_cards(pid: int) -> tuple[list[dict], list[int]]:
+    """项目全部 ready 图纸的画像卡（脱敏态 summary/filename）+ id 指纹"""
+    from db.database import SessionLocal
+    from db.models.project import ProjectDrawing
+    from services.mask_service import (
+        load_project_cipher, save_project_cipher, mask_text)
+
+    db = SessionLocal()
+    try:
+        drawings = db.query(ProjectDrawing).filter_by(
+            project_id=pid, status="ready").order_by(ProjectDrawing.id).all()
+        rows = [(d.id, d.cache_file_id, d.filename, d.rel_path) for d in drawings]
+    finally:
+        db.close()
+    pdir = project_dir(pid)
+    cmap = load_project_cipher(pdir)
+    cards = []
+    for did, fid, filename, rel_path in rows:
+        summary = ""
+        try:
+            info = json.loads((UPLOAD_DIR / f"{fid}.json").read_text(encoding="utf-8"))
+            summary = info.get("summary") or ""
+        except Exception:
+            pass
+        cards.append({
+            "file_id": fid,
+            "filename": mask_text(filename, cmap),
+            "rel_path": mask_text(rel_path or filename, cmap),
+            "summary": summary,
+        })
+    save_project_cipher(pdir, cmap)
+    return cards, sorted(did for did, *_ in rows)
+
+
+async def abuild_project_relations(pid: int, force: bool = False) -> dict | None:
+    """重建项目批次关系图（脱敏态落盘 data/projects/{pid}/relations.json）。
+    指纹（ready 图纸 id 排序）不变且非 force → 跳过。失败返回 None。"""
+    from config import load_config
+    cfg = load_config()
+    if not cfg.agent_settings.profile_agent_enabled:
+        return None
+    cards, fingerprint = _project_drawing_cards(pid)
+    if not cards:
+        return None
+    rel_path = project_dir(pid) / "relations.json"
+    if not force and rel_path.exists():
+        try:
+            old = json.loads(rel_path.read_text(encoding="utf-8"))
+            if old.get("drawing_ids") == fingerprint and old.get("description"):
+                return old
+        except Exception:
+            pass
+    from services.llm_service import LLMService
+    from services.agents import profile as profile_agent
+    res = await profile_agent.build_relations(
+        LLMService(), cfg.drawing_provider_index, cards)
+    if not res:
+        return None
+    res["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    res["drawing_ids"] = fingerprint
+    tmp = rel_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(tmp), str(rel_path))
+    logger.info("[画像] 关系图完成 project=%s 图纸=%d 边=%d",
+                pid, len(cards), len(res.get("edges") or []))
+    return res
+
+
+def build_project_relations(pid: int, force: bool = False) -> dict | None:
+    """同步包装（worker 线程用；async 上下文请直接 await abuild_project_relations）"""
+    import asyncio
+    try:
+        return asyncio.run(abuild_project_relations(pid, force=force))
+    except Exception:
+        logger.exception("[画像] 关系图生成失败 project=%s", pid)
+        return None
 
 
 def process_drawing(drawing_id: int):
@@ -352,6 +526,8 @@ def process_drawing(drawing_id: int):
                     if det["slices"]:
                         masked_info["frame_count"] = det["frame_count"]
                         masked_info["image_count"] = 1 + len(det["slices"])  # 首页=整图总览
+                        # 图框 rect/图名落盘：定位Agent免OCR快路径 + 按图幅文字摘要归属判定
+                        masked_info["frames"] = _frames_meta(det["frames"], masked_info)
                     elif det["ocr_count"]:
                         # 矢量失明但 OCR 有估计：不切片，记录供 AI 上下文
                         masked_info["frame_count"] = det["ocr_count"]

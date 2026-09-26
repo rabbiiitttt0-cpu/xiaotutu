@@ -261,6 +261,58 @@ async def delete_drawing(project_id: int, drawing_id: int, db: Session = Depends
     return {"message": "已删除"}
 
 
+# ==================== 关系图（批次画像，预处理自动生成） ====================
+
+@router.get("/{project_id}/relations")
+async def get_relations(project_id: int, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    """批次图纸关系图（预处理完成后自动生成）。不存在 → available=False；
+    指纹与当前 ready 图纸不一致 → stale=True（前端提示可刷新）。
+    存储为脱敏态，返回前按项目对照表还原（脱敏红线只针对送 LLM）。"""
+    _require_member(db, project_id, user)
+    rel_path = project_service.project_dir(project_id) / "relations.json"
+    if not rel_path.exists():
+        return {"available": False}
+    try:
+        data = json.loads(rel_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False}
+    ready_ids = sorted(d.id for d in db.query(ProjectDrawing).filter_by(
+        project_id=project_id, status="ready"))
+    stale = data.get("drawing_ids") != ready_ids
+    # file_id → 真实文件名（DB 原文，无需还原）
+    name_by_fid = {d.cache_file_id: d.filename for d in db.query(ProjectDrawing).filter_by(
+        project_id=project_id)}
+    cmap = load_project_cipher(project_service.project_dir(project_id))
+    nodes = [{"file_id": n.get("file_id"),
+              "filename": name_by_fid.get(n.get("file_id"), ""),
+              "kind": n.get("kind", "")}
+             for n in data.get("nodes") or [] if n.get("file_id") in name_by_fid]
+    edges = [{"from": e.get("from"), "to": e.get("to"),
+              "relation": restore_text(e.get("relation", ""), cmap)}
+             for e in data.get("edges") or []]
+    return {
+        "available": True,
+        "stale": stale,
+        "generated_at": data.get("generated_at", ""),
+        "nodes": nodes,
+        "edges": edges,
+        "description": restore_text(data.get("description", ""), cmap),
+    }
+
+
+@router.post("/{project_id}/relations/refresh")
+async def refresh_relations(project_id: int, db: Session = Depends(get_db),
+                            _: User = Depends(require_super_admin)):
+    """手动重建关系图（LLM 调用，约几十秒）。返回最新关系数据。"""
+    _get_project(db, project_id)
+    res = await project_service.abuild_project_relations(project_id, force=True)
+    if not res:
+        raise HTTPException(status_code=400,
+                            detail="关系图生成失败（无 ready 图纸或模型调用失败）")
+    return await get_relations(project_id, db=db, user=_)
+
+
 # ==================== 成员：我的项目与图纸选用 ====================
 
 @router.get("/mine")

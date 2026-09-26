@@ -187,6 +187,8 @@ export const projects = {
   getSession: (id, sid) => api.get(`/projects/${id}/sessions/${sid}`),
   removeSession: (id, sid) => api.delete(`/projects/${id}/sessions/${sid}`),
   drawingsTree: (id) => api.get(`/projects/${id}/drawings-tree`),
+  relations: (id) => api.get(`/projects/${id}/relations`),
+  refreshRelations: (id) => llmApi.post(`/projects/${id}/relations/refresh`),
 }
 
 // ===== 审计日志 =====

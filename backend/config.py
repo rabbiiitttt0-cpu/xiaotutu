@@ -28,6 +28,8 @@ class AgentSettings(BaseModel):
     drawing_pdf_text_max: int = 8000   # 文字层注入prompt总量上限(字符)
     drawing_ocr_dpi: int = 150         # 本地OCR渲染精度(无文字层PDF补OCR文字层)
     drawing_ocr_text_max: int = 8000   # OCR文字层注入prompt上限(字符)
+    snip_locate_enabled: bool = True   # 定位Agent+Snip局部放大总开关（关闭→回退既有路由链路）
+    profile_agent_enabled: bool = True  # 预处理画像/批次关系图开关（关闭→不生成摘要与关系）
 
 
 class LLMProviderConfig(BaseModel):

@@ -827,11 +827,55 @@ def _pdf_route_pages(sheet: dict, question: str, project_id: int = 0,
     return "\n".join(parts)
 
 
+async def _orchestrated_prep(question: str, history: list, sheets: list[dict],
+                             llm_service: "LLMService", pidx: int,
+                             project_id: int = 0) -> dict | None:
+    """定位Agent编排：目录卡→LocateAgent（窗口A）→Snip生料包。
+    返回 None = 回退既有路由链路。任何异常由调用方兜底。"""
+    from services.agents import orchestrator
+    cards, info_by_fid = [], {}
+    for s in sheets:
+        try:
+            info = _load_context(s["file_id"])
+        except Exception:
+            continue
+        info_by_fid[s["file_id"]] = info
+        cards.append(orchestrator.card_from_info(
+            s["file_id"], info, fallback_summary=s.get("summary", "")))
+    if not cards:
+        return None
+    relations_desc = ""
+    if project_id:
+        try:
+            rel = project_service.project_dir(project_id) / "relations.json"
+            if rel.exists():
+                relations_desc = json.loads(
+                    rel.read_text(encoding="utf-8")).get("description", "")
+        except Exception:
+            pass
+    return await orchestrator.prepare(
+        question=question, history=history, cards=cards, info_by_fid=info_by_fid,
+        llm_service=llm_service, provider_index=pidx, relations_desc=relations_desc)
+
+
+def _payload_content(question: str, prep: dict) -> tuple[object, bool]:
+    """生料包 → 多模态 user content（附图说明编号与图像一一对应）"""
+    if not prep.get("images"):
+        return (question, False)
+    content = [{"type": "text", "text": question + (prep.get("notes") or "")}]
+    for img in prep["images"]:
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img['b64']}"}})
+    return (content, True)
+
+
 async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
                         prompt_builder, temperature: float, max_tokens: int,
-                        snip_image: str = "", history: list | None = None):
+                        snip_image: str = "", history: list | None = None,
+                        use_agents: bool = False):
     """图纸集 LLM 调用公共流程：路由(>3张)→PDF深页检索→文本上下文+图→调用→记用量。
-    prompt_builder(kind_cn, names, ctx) -> system_prompt"""
+    prompt_builder(kind_cn, names, ctx) -> system_prompt
+    use_agents=True 时优先走多Agent编排（LocateAgent定位+Snip生料包），失败回退既有路由"""
     srec = _load_set(req_set_id)
     sheets = srec.get("sheets", [])
     if not sheets:
@@ -839,14 +883,29 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
     config = load_config()
     llm_service = LLMService()
     pidx = config.drawing_provider_index
+    proj_id = srec.get("project_id") or 0
 
-    if len(sheets) <= 3:
-        selected, route_reason = sheets, ""
-    else:
-        selected, route_reason = await _route_sheets(sheets, question, llm_service, pidx)
+    prep = None
+    if use_agents and config.agent_settings.snip_locate_enabled:
+        try:
+            prep = await _orchestrated_prep(question, history or [], sheets,
+                                            llm_service, pidx, proj_id)
+        except Exception:
+            logging.getLogger("app").exception("[orchestrator] 图纸集定位失败，回退既有路由")
+            prep = None
+    if prep:
+        by_id = {s["file_id"]: s for s in sheets}
+        selected = [by_id[fid] for fid in prep["selected_file_ids"] if fid in by_id]
+        route_reason = prep.get("reason", "")
+        if not selected:
+            prep = None
+    if not prep:
+        if len(sheets) <= 3:
+            selected, route_reason = sheets, ""
+        else:
+            selected, route_reason = await _route_sheets(sheets, question, llm_service, pidx)
 
     # PDF 深页路由：按问题检索全页文字层，命中页补渲染 + 文本摘录注入上下文
-    proj_id = srec.get("project_id") or 0
     for s in selected:
         try:
             extra = _pdf_route_pages(s, question, proj_id)
@@ -856,9 +915,12 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
             pass  # 深页检索失败不阻断主问答
 
     ctx = _set_text_context(selected, question)
-    # 图纸集总览（含图幅关系描述）注入，辅助跨图纸关系推理
+    # 按图幅分组的文字摘要（对比型定位的文本武器）
+    if prep and prep.get("texts"):
+        ctx += "\n\n" + "\n".join(prep["texts"])
+    # 图纸集总览注入 QA（orchestrated 路径下关系描述已进 LocateAgent 窗口，QA 不再背）
     set_summary = (srec.get("set_summary") or "").strip()
-    if set_summary:
+    if set_summary and not prep:
         ctx = f"【图纸集总览（含各图幅关系）】\n{set_summary}\n\n{ctx}"
     names = "、".join(s["filename"] for s in selected)
     has_any_image = any(_png_paths(s["file_id"]) for s in selected)
@@ -867,15 +929,27 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
                 "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
     system_prompt = prompt_builder(len(sheets), names, ctx, has_any_image)
 
-    user_content, with_image = _set_image_content(question, selected)
-    if snip_image:
-        user_content = _prepend_snip(user_content, snip_image)
-        with_image = True
-    result = await llm_service.chat_complete(
-        messages=[{"role": "system", "content": system_prompt}]
-                 + _history_msgs(history or [])
-                 + [{"role": "user", "content": user_content}],
-        provider_index=pidx, temperature=temperature, max_tokens=max_tokens, module="drawing")
+    if prep and prep.get("images"):
+        # 定位Agent生料包：整幅切片+部位裁剪（替代轮转图包）
+        user_content, with_image = _payload_content(question, prep)
+        if snip_image:
+            user_content = _prepend_snip(user_content, snip_image)
+            with_image = True
+        from services.agents import qa as qa_agent
+        result = await qa_agent.answer(
+            llm_service, pidx, system_prompt=system_prompt,
+            history_msgs=_history_msgs(history or []), user_content=user_content,
+            temperature=temperature, max_tokens=max_tokens)
+    else:
+        user_content, with_image = _set_image_content(question, selected)
+        if snip_image:
+            user_content = _prepend_snip(user_content, snip_image)
+            with_image = True
+        result = await llm_service.chat_complete(
+            messages=[{"role": "system", "content": system_prompt}]
+                     + _history_msgs(history or [])
+                     + [{"role": "user", "content": user_content}],
+            provider_index=pidx, temperature=temperature, max_tokens=max_tokens, module="drawing")
     _record_usage(endpoint, with_image, getattr(llm_service, "last_usage", None))
     referenced = [{"file_id": s["file_id"], "filename": s["filename"]} for s in selected]
     return result, with_image, referenced, route_reason
@@ -1063,7 +1137,7 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
 - 使用专业但易懂的工程术语，中文回答"""
         result, with_image, referenced, route_reason = await _set_llm_call(
             req.set_id, question_masked, "chat", build_prompt, 0.5, 16384,
-            snip_image=req.snip_image, history=history)
+            snip_image=req.snip_image, history=history, use_agents=True)
         answer = result
         new_session_id = 0
         if project_id:
@@ -1130,6 +1204,26 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
                           "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
 
     user_content, with_image = _image_content_ex(question_masked, req.file_id, info)
+
+    # 多Agent编排：LocateAgent 定位 + Snip 生料包（整幅切片+部位裁剪替代默认图包）。
+    # 失败/无图 → 上面构造的默认 content 原样使用（静默回退）
+    prep = None
+    if config.agent_settings.snip_locate_enabled:
+        try:
+            sheet = {"file_id": req.file_id, "filename": info.get("filename", ""),
+                     "summary": ""}
+            prep = await _orchestrated_prep(question_masked, history, [sheet],
+                                            llm_service,
+                                            config.drawing_provider_index,
+                                            req.project_id or 0)
+        except Exception:
+            logging.getLogger("app").exception("[orchestrator] 单图定位失败，回退默认图包")
+            prep = None
+    if prep and prep.get("images"):
+        if prep.get("texts"):
+            system_prompt += "\n\n## 相关图幅文字摘要\n" + "\n\n".join(prep["texts"])
+        user_content, with_image = _payload_content(question_masked, prep)
+
     if req.snip_image:
         user_content = _prepend_snip(user_content, req.snip_image)
         with_image = True

@@ -66,9 +66,12 @@
                 {{ zipUploading ? '上传中...' : '上传图纸压缩包(.zip)' }}
               </el-button>
             </el-upload>
-            <span style="font-size: 12px; color: #909399">
+            <span style="font-size: 12px; color: #909399; flex: 1">
               支持 .dwg/.dxf/.pdf 混合打包；上传后后台串行预处理，可离开本页稍后查看
             </span>
+            <el-button size="small" plain :disabled="!drawings.length" @click="openRelations">
+              图纸关系图
+            </el-button>
           </div>
 
           <!-- 有目录层级时用树形展示，否则用平铺表格 -->
@@ -230,6 +233,66 @@
       <template #footer>
         <el-button @click="setDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="setSaving" @click="saveSet">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 图纸关系图（预处理自动生成的批次画像；手绘 SVG，不引图库） -->
+    <el-dialog v-model="relVisible" title="图纸关系图" width="780px" destroy-on-close>
+      <div v-loading="relLoading">
+        <el-alert
+          v-if="relData.available && relData.stale" type="warning" :closable="false"
+          title="图纸已有增删，关系图可能过期，可点击右下角重新生成"
+          style="margin-bottom: 10px"
+        />
+        <template v-if="relData.available">
+          <svg
+            v-if="relLayout.nodes.length"
+            :viewBox="`0 0 ${relLayout.w} ${relLayout.h}`"
+            style="width: 100%; background: #fafafa; border: 1px solid #ebeef5; border-radius: 4px"
+          >
+            <defs>
+              <marker id="rel-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                      markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#c0c4cc" />
+              </marker>
+            </defs>
+            <text
+              v-for="(k, i) in relLayout.kinds" :key="'k' + i"
+              :x="20 + i * (REL_NW + REL_GX) + REL_NW / 2" y="22"
+              font-size="12" fill="#909399" text-anchor="middle" font-weight="600"
+            >{{ k }}</text>
+            <g v-for="(e, i) in relLayout.edges" :key="'e' + i">
+              <line :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2"
+                    stroke="#c0c4cc" stroke-width="1.2" marker-end="url(#rel-arrow)" />
+              <text :x="e.mx" :y="e.my" font-size="11" fill="#909399" text-anchor="middle">{{ e.relation }}</text>
+            </g>
+            <g v-for="n in relLayout.nodes" :key="n.file_id">
+              <rect :x="n.x" :y="n.y" :width="REL_NW" :height="REL_NH" rx="4"
+                    fill="#fff" stroke="#409eff" stroke-width="1" />
+              <text :x="n.x + REL_NW / 2" :y="n.y + 20" font-size="12" fill="#303133" text-anchor="middle">
+                {{ n.label }}
+              </text>
+              <text :x="n.x + REL_NW / 2" :y="n.y + 36" font-size="10" fill="#909399" text-anchor="middle">
+                {{ n.kind }}
+              </text>
+            </g>
+          </svg>
+          <el-divider content-position="left">关系描述</el-divider>
+          <p style="white-space: pre-wrap; font-size: 13px; color: #606266; margin: 0 4px">
+            {{ relData.description || '（无描述）' }}
+          </p>
+          <div style="color: #909399; font-size: 12px; margin-top: 8px">
+            生成时间：{{ relData.generated_at }}
+          </div>
+        </template>
+        <el-empty
+          v-else-if="!relLoading" :image-size="60"
+          description="关系图尚未生成（图纸预处理完成后自动生成，也可手动生成）"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="relVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="relRefreshing" @click="refreshRelations">重新生成</el-button>
       </template>
     </el-dialog>
   </div>
@@ -459,6 +522,85 @@ async function removeSet(s) {
     loadSets()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+// ----- 关系图（批次画像：预处理自动生成，可手动刷新） -----
+const relVisible = ref(false)
+const relLoading = ref(false)
+const relRefreshing = ref(false)
+const relData = ref({ available: false, nodes: [], edges: [], description: '' })
+
+const REL_NW = 190  // 节点宽
+const REL_NH = 46   // 节点高
+const REL_GX = 60   // 列间距
+const REL_GY = 64   // 行间距
+
+// 布局：按 kind 分列，列内纵排；边 = 节点中心连线
+const relLayout = computed(() => {
+  const nodes = relData.value.nodes || []
+  const edges = relData.value.edges || []
+  const kinds = [...new Set(nodes.map(n => n.kind || '其他'))]
+  const pos = {}
+  kinds.forEach((k, ci) => {
+    nodes.filter(n => (n.kind || '其他') === k).forEach((n, ri) => {
+      const name = n.filename || n.file_id
+      pos[n.file_id] = {
+        ...n,
+        label: name.length > 15 ? name.slice(0, 14) + '…' : name,
+        x: 20 + ci * (REL_NW + REL_GX),
+        y: 40 + ri * (REL_NH + REL_GY),
+      }
+    })
+  })
+  const ns = Object.values(pos)
+  const es = edges.map(e => {
+    const a = pos[e.from]
+    const b = pos[e.to]
+    if (!a || !b) return null
+    return {
+      x1: a.x + REL_NW / 2, y1: a.y + REL_NH / 2,
+      x2: b.x + REL_NW / 2, y2: b.y + REL_NH / 2,
+      mx: (a.x + b.x) / 2 + REL_NW / 2, my: (a.y + b.y) / 2 + REL_NH / 2 - 6,
+      relation: e.relation,
+    }
+  }).filter(Boolean)
+  const maxRows = Math.max(1, ...kinds.map(
+    k => nodes.filter(n => (n.kind || '其他') === k).length))
+  return {
+    kinds,
+    nodes: ns,
+    edges: es,
+    w: Math.max(360, 40 + kinds.length * (REL_NW + REL_GX)),
+    h: Math.max(160, 40 + maxRows * (REL_NH + REL_GY)),
+  }
+})
+
+async function openRelations() {
+  relVisible.value = true
+  relLoading.value = true
+  try {
+    const { data } = await projectsApi.relations(current.value.id)
+    relData.value = data.available
+      ? data
+      : { available: false, nodes: [], edges: [], description: '' }
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    relLoading.value = false
+  }
+}
+
+async function refreshRelations() {
+  relRefreshing.value = true
+  try {
+    const { data } = await projectsApi.refreshRelations(current.value.id)
+    if (data.available) relData.value = data
+    ElMessage.success('关系图已重新生成')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    relRefreshing.value = false
   }
 }
 
