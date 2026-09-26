@@ -52,9 +52,10 @@ def _card_text(info: dict, filename: str) -> str:
 async def summarize_drawing(llm_service, provider_index: int, info: dict,
                             filename: str) -> dict | None:
     """单图画像 → {summary, frame_summaries:[{frame,title,summary}]}，失败 None。"""
+    # deepseek 推理模型 reasoning 占 max_tokens，1500 属临界，留足余量
     parsed = await run_agent(llm_service, provider_index, module=MODULE,
                              system=_SUMMARY_SYS, user=_card_text(info, filename),
-                             max_tokens=1500, temperature=0.1, expect_json=True)
+                             max_tokens=4096, temperature=0.1, expect_json=True)
     if not isinstance(parsed, dict) or not parsed.get("summary"):
         return None
     fs = parsed.get("frame_summaries")

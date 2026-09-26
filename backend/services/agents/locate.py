@@ -136,9 +136,11 @@ async def locate(llm_service, provider_index: int, *, question: str,
     if history_brief:
         user += f"\n最近对话（供解析指代）：\n{history_brief[-800:]}\n"
     user += f"\n{_catalog_text(cards, relations_desc)}"
+    # deepseek 推理模型的 reasoning 也占 max_tokens：1500 在临界（实测偶发被
+    # reasoning 耗尽 → JSON 为空 → 静默回退），给足 4096
     parsed = await run_agent(llm_service, provider_index, module=MODULE,
                              system=_SYS, user=user,
-                             max_tokens=1500, temperature=0.1, expect_json=True)
+                             max_tokens=4096, temperature=0.1, expect_json=True)
     if parsed is None:
         return None
     return _validate(parsed, cards)

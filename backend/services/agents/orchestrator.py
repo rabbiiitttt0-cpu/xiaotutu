@@ -75,6 +75,7 @@ async def prepare(*, question: str, history: list, cards: list[dict],
         history_brief=history_brief(history), cards=cards,
         relations_desc=relations_desc)
     if not sel:
+        logger.warning("[orchestrator] LocateAgent 无有效定位，回退既有链路")
         return None
     _ensure_axis_target(sel, question, cards)
     try:
@@ -82,6 +83,10 @@ async def prepare(*, question: str, history: list, cards: list[dict],
     except Exception:
         logger.exception("[orchestrator] build_payload 失败")
         return None
+    logger.info("[orchestrator] 定位完成：%s｜图=%d 裁剪=%d 理由=%s",
+                [s["file_id"] for s in sel["selections"]],
+                len(sel["selections"]), len(payload["images"]),
+                sel.get("reason", "")[:80])
     selected_ids = []
     for s in sel["selections"]:
         if s["file_id"] not in selected_ids:
