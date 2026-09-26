@@ -77,10 +77,12 @@ async def build_relations(llm_service, provider_index: int,
         f"[{c['file_id']}] {c.get('rel_path') or c.get('filename', '')}"
         + (f"｜{c['summary'][:200]}" if c.get("summary") else "")
         for c in cards)
+    # 72 节点+边的 JSON 输出较长；deepseek 推理模型的 reasoning 也占 max_tokens，
+    # 2048 会在输出正文前耗尽 → 给足 8192（实测 2048 必败、8192 通过）
     parsed = await run_agent(llm_service, provider_index, module=MODULE,
                              system=_REL_SYS,
                              user=f"本批图纸共 {len(cards)} 张：\n{listing}",
-                             max_tokens=2048, temperature=0.1, expect_json=True)
+                             max_tokens=8192, temperature=0.1, expect_json=True)
     if not isinstance(parsed, dict):
         return None
     valid = {c["file_id"] for c in cards}
