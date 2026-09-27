@@ -1,6 +1,6 @@
 """图表渲染调度层：spec 归一化 → 按图型路由引擎 → PNG
 
-引擎静态路由（无外部依赖，2026-08-18 甲方定：PIL+matplotlib 为主引擎，不引入 Mermaid）：
+引擎静态路由（无外部依赖：PIL+matplotlib 为主引擎，不引入 Mermaid）：
 - PIL：flowchart / mindmap / orgchart / fishbone
 - matplotlib：pie / bar / line / pareto
 任何渲染失败都不向上抛——返回 False，调用方把 chart item 降级为文字列表。
