@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 from .models import User
 
 # ===== 配置 =====
-JWT_SECRET = os.environ.get("JWT_SECRET", "chengyigong-engineering-assistant-secret-key-2026")
+JWT_SECRET = os.environ.get("JWT_SECRET", "kantutu-drawing-assistant-secret-key-2026")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 120  # 2小时（前端已加401自动续期，双保险）
-REFRESH_TOKEN_EXPIRE_DAYS = 3  # 3天（甲方口径：3天一登录）
+REFRESH_TOKEN_EXPIRE_DAYS = 3  # 3天（3天一登录）
 
 # ===== 密码哈希 =====
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
