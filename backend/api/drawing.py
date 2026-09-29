@@ -89,6 +89,75 @@ def _load_context(file_id: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+# ==================== 数据隔离（演示账号互不可见） ====================
+
+def _owner_id(rec: dict):
+    """记录归属人 id；历史数据无 user_id → None（仅超管可见）"""
+    v = rec.get("user_id")
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_project_member(project_id: int, user: User) -> bool:
+    if user.is_super_admin:
+        return True
+    from db.database import SessionLocal
+    from db.models.project import ProjectMember
+    db = SessionLocal()
+    try:
+        return db.query(ProjectMember).filter_by(
+            project_id=int(project_id), user_id=user.id).first() is not None
+    finally:
+        db.close()
+
+
+def _can_view_file(file_id: str, info: dict, user: User) -> bool:
+    """图纸可见性：超管全通 / 归属人本人 / 所属项目成员（经 ProjectDrawing 反查，
+    兼容未打 user_id 的历史上下文与项目图纸——成员看项目图纸不能被隔离挡住）"""
+    if user.is_super_admin:
+        return True
+    if _owner_id(info) == user.id:
+        return True
+    from db.database import SessionLocal
+    from db.models.project import ProjectDrawing, ProjectMember
+    db = SessionLocal()
+    try:
+        d = db.query(ProjectDrawing).filter_by(cache_file_id=file_id).first()
+        if d and db.query(ProjectMember).filter_by(
+                project_id=d.project_id, user_id=user.id).first():
+            return True
+        return False
+    finally:
+        db.close()
+
+
+def _require_file(file_id: str, info: dict, user: User, what: str = "图纸"):
+    if not _can_view_file(file_id, info, user):
+        raise HTTPException(status_code=403, detail=f"无权访问他人的{what}")
+
+
+def _require_set(rec: dict, user: User, what: str = "图纸集"):
+    """图纸集：超管全通；项目集（pset，带 project_id）按项目成员；个人集按归属人"""
+    if user.is_super_admin:
+        return
+    pid = rec.get("project_id") or 0
+    if pid:
+        if not _is_project_member(int(pid), user):
+            raise HTTPException(status_code=403, detail="您不是该项目成员")
+        return
+    if _owner_id(rec) != user.id:
+        raise HTTPException(status_code=403, detail=f"无权访问他人的{what}")
+
+
+def _require_session(rec: dict, user: User):
+    if user.is_super_admin:
+        return
+    if _owner_id(rec) != user.id:
+        raise HTTPException(status_code=403, detail="无权访问他人的会话")
+
+
 def _record_usage(endpoint: str, with_image: bool, usage: dict | None):
     """记录一次 LLM 调用的 token 用量（usage 为 DeepSeek 响应 usage 字段）"""
     entry = {
@@ -230,7 +299,8 @@ async def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_curr
     if info.get("tiled"):
         masked["tiled"] = True
 
-    # 上下文落盘（多 worker / 重启不丢）
+    # 上下文落盘（多 worker / 重启不丢）；打归属人 → 成员间数据隔离
+    masked["user_id"] = user.id
     _save_context(file_id, masked)
 
     from services.audit_log import audit_event
@@ -252,9 +322,11 @@ async def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_curr
 
 
 @router.get("/{file_id}/image")
-async def drawing_image(file_id: str, fmt: str = ""):
+async def drawing_image(file_id: str, fmt: str = "",
+                        user: User = Depends(get_current_user)):
     """图纸渲染预览图（首页；路由 include 级已带登录认证，勿改裸静态挂载）。
     fmt=svg 时优先返回矢量预览（DXF 无限放大不糊；无 SVG 回退 PNG）"""
+    _require_file(file_id, _load_context(file_id), user)
     if fmt == "svg":
         svg = UPLOAD_DIR / f"{file_id}.svg"
         if not svg.exists():
@@ -276,8 +348,10 @@ async def drawing_image(file_id: str, fmt: str = ""):
 
 
 @router.get("/{file_id}/image/{n}")
-async def drawing_image_n(file_id: str, n: int):
+async def drawing_image_n(file_id: str, n: int,
+                          user: User = Depends(get_current_user)):
     """图纸渲染预览图第 n 页（PDF 多页图纸用）"""
+    _require_file(file_id, _load_context(file_id), user)
     pngs = _png_paths(file_id)
     if not pngs or n < 1 or n > len(pngs):
         raise HTTPException(status_code=404, detail="预览图不存在")
@@ -285,18 +359,22 @@ async def drawing_image_n(file_id: str, n: int):
 
 
 @router.get("/{file_id}/pages")
-async def drawing_pages(file_id: str):
+async def drawing_pages(file_id: str,
+                        user: User = Depends(get_current_user)):
     """预览总页数（_hi/总览 + 图框切片），前端翻页器按此懒加载，免逐一 404 探测"""
+    _require_file(file_id, _load_context(file_id), user)
     return {"count": len(_png_paths(file_id))}
 
 
 @router.get("/list")
-async def list_drawings():
-    """获取已上传图纸列表"""
+async def list_drawings(user: User = Depends(get_current_user)):
+    """获取已上传图纸列表（成员仅见自己上传的；超管见全部）"""
     results = []
     for p in sorted(UPLOAD_DIR.glob("dxf_*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
         try:
             info = json.loads(p.read_text(encoding="utf-8"))
+            if not user.is_super_admin and _owner_id(info) != user.id:
+                continue
             results.append({
                 "file_id": p.stem,
                 "filename": info.get("filename", ""),
@@ -312,14 +390,18 @@ async def list_drawings():
 # ==================== 会话持久化（前端早已在调，此前后端缺失空转） ====================
 
 @router.post("/sessions")
-async def save_session(data: dict):
-    """保存/更新会话（有 session_id 则更新，否则新建）"""
+async def save_session(data: dict, user: User = Depends(get_current_user)):
+    """保存/更新会话（有 session_id 则更新，否则新建；session_id 归属校验防劫持他人会话）"""
     sid = data.get("session_id") or f"sess_{uuid.uuid4().hex[:8]}"
     path = SESSIONS_DIR / f"{sid}.json"
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if path.exists():
         try:
-            created_at = json.loads(path.read_text(encoding="utf-8")).get("created_at", created_at)
+            old = json.loads(path.read_text(encoding="utf-8"))
+            _require_session(old, user)  # 更新他人（或无主历史）会话 → 403
+            created_at = old.get("created_at", created_at)
+        except HTTPException:
+            raise
         except Exception:
             pass
     record = {
@@ -335,6 +417,7 @@ async def save_session(data: dict):
         "messages": data.get("messages", []),
         "created_at": created_at,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "user_id": user.id,  # 归属人（新建=本人；更新到此已通过归属校验）
     }
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
@@ -343,12 +426,14 @@ async def save_session(data: dict):
 
 
 @router.get("/sessions")
-async def list_sessions():
-    """会话列表（摘要，按更新时间倒序）"""
+async def list_sessions(user: User = Depends(get_current_user)):
+    """会话列表（摘要，按更新时间倒序；成员仅见自己的）"""
     results = []
     for p in SESSIONS_DIR.glob("sess_*.json"):
         try:
             r = json.loads(p.read_text(encoding="utf-8"))
+            if not user.is_super_admin and _owner_id(r) != user.id:
+                continue
             results.append({
                 "session_id": r.get("session_id", p.stem),
                 "filename": r.get("filename", ""),
@@ -364,20 +449,23 @@ async def list_sessions():
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, user: User = Depends(get_current_user)):
     """加载完整会话"""
     path = SESSIONS_DIR / f"{session_id}.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="会话不存在")
-    return json.loads(path.read_text(encoding="utf-8"))
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    _require_session(rec, user)
+    return rec
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, user: User = Depends(get_current_user)):
     """删除会话"""
     path = SESSIONS_DIR / f"{session_id}.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="会话不存在")
+    _require_session(json.loads(path.read_text(encoding="utf-8")), user)
     path.unlink()
     return {"message": "删除成功"}
 
@@ -427,7 +515,7 @@ def _sheet_card(info: dict) -> dict:
 
 
 @router.post("/sets")
-async def create_or_add_set(data: dict):
+async def create_or_add_set(data: dict, user: User = Depends(get_current_user)):
     """创建图纸集或向既有集追加图幅。body: {file_ids: [...], set_id?: str, name?: str}"""
     file_ids = data.get("file_ids") or []
     if not file_ids and not data.get("set_id"):
@@ -435,11 +523,16 @@ async def create_or_add_set(data: dict):
     set_id = data.get("set_id") or f"set_{uuid.uuid4().hex[:8]}"
     path = UPLOAD_DIR / f"{set_id}.json"
     sheets, created_at = [], datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    owner = user.id
     if path.exists():
         try:
             old = json.loads(path.read_text(encoding="utf-8"))
+            _require_set(old, user, "图纸集")  # 向他人集追加 → 403
             sheets = old.get("sheets", [])
             created_at = old.get("created_at", created_at)
+            owner = _owner_id(old)  # 追加不改归属（超管替成员维护时保留原主）
+        except HTTPException:
+            raise
         except Exception:
             pass
     existing = {s["file_id"] for s in sheets}
@@ -448,6 +541,7 @@ async def create_or_add_set(data: dict):
         if fid in existing:
             continue
         info = _load_context(fid)  # 坏 id 会 404，及早暴露
+        _require_file(fid, info, user, "图纸")  # 不能把他人图纸收进自己的集
         # 同名图纸已在集内则跳过（重复上传会产生新 file_id，按文件名去重防重复图幅）
         if info.get("filename", "") in existing_names:
             continue
@@ -455,7 +549,8 @@ async def create_or_add_set(data: dict):
         card["file_id"] = fid
         sheets.append(card)
         existing_names.add(card["filename"])
-    rec = {"set_id": set_id, "name": data.get("name", ""), "sheets": sheets, "created_at": created_at}
+    rec = {"set_id": set_id, "name": data.get("name", ""), "sheets": sheets,
+           "created_at": created_at, "user_id": owner}
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
     os.replace(str(tmp), str(path))
@@ -463,15 +558,19 @@ async def create_or_add_set(data: dict):
 
 
 @router.get("/sets/{set_id}")
-async def get_set(set_id: str):
-    return _load_set(set_id)
+async def get_set(set_id: str, user: User = Depends(get_current_user)):
+    rec = _load_set(set_id)
+    _require_set(rec, user)
+    return rec
 
 
 @router.put("/sets/{set_id}/summary")
-async def save_set_summary(set_id: str, data: dict):
+async def save_set_summary(set_id: str, data: dict,
+                           user: User = Depends(get_current_user)):
     """保存图纸集总览（含图幅关系描述，自动概述生成后由前端回写）——
     后续跨图纸提问时注入 prompt 辅助关系推理"""
     rec = _load_set(set_id)
+    _require_set(rec, user)
     rec["set_summary"] = (data.get("summary") or "")[:4000]
     path = UPLOAD_DIR / f"{set_id}.json"
     tmp = path.with_suffix(".json.tmp")
@@ -481,9 +580,11 @@ async def save_set_summary(set_id: str, data: dict):
 
 
 @router.delete("/sets/{set_id}/sheets/{file_id}")
-async def remove_sheet(set_id: str, file_id: str):
+async def remove_sheet(set_id: str, file_id: str,
+                       user: User = Depends(get_current_user)):
     """从图纸集移除单个图幅（前端单文件删除联动）"""
     rec = _load_set(set_id)
+    _require_set(rec, user)
     before = len(rec.get("sheets", []))
     rec["sheets"] = [s for s in rec.get("sheets", []) if s.get("file_id") != file_id]
     if len(rec["sheets"]) == before:
@@ -1111,6 +1212,8 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
         except HTTPException:
             srec = {}
         project_id = req.project_id or srec.get("project_id") or 0
+        if srec and not project_id:
+            _require_set(srec, user)  # 个人集按归属；项目集成员校验在 _project_chat_ctx
         pdir, history, question_masked = None, [], req.question
         if project_id:
             req.project_id = project_id
@@ -1152,6 +1255,7 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
 
     # ===== 单图模式（原有逻辑） =====
     info = _load_context(req.file_id)
+    _require_file(req.file_id, info, user)  # 成员仅可问自己的/项目内图纸
     config = load_config()
     llm_service = LLMService()
 
@@ -1263,9 +1367,10 @@ class MaterialRequest(BaseModel):
 
 
 @router.post("/materials")
-async def extract_materials(req: MaterialRequest):
+async def extract_materials(req: MaterialRequest, user: User = Depends(get_current_user)):
     """材料提取：单图(file_id)或图纸集(set_id，自动路由到材料相关图幅)"""
     if req.set_id:
+        _require_set(_load_set(req.set_id), user)  # 个人集按归属；项目集按项目成员
         def build_prompt(total, names, ctx, has_img):
             vision_note = ("\n\n附：本消息附带所选图幅的渲染图像，请同时从图像中核对材料表、图注。"
                            if has_img else "")
@@ -1300,6 +1405,9 @@ async def extract_materials(req: MaterialRequest):
 
     # ===== 单图模式（原有逻辑） =====
     info = _load_context(req.file_id)
+    _require_file(req.file_id, info, user)
+    if req.project_id and not _is_project_member(req.project_id, user):
+        raise HTTPException(status_code=403, detail="您不是该项目成员")
     config = load_config()
     llm_service = LLMService()
 
@@ -1360,9 +1468,10 @@ class BriefingRequest(BaseModel):
 
 
 @router.post("/briefing")
-async def generate_briefing(req: BriefingRequest):
+async def generate_briefing(req: BriefingRequest, user: User = Depends(get_current_user)):
     """生成图纸交底文件：单图(file_id)或图纸集(set_id)"""
     if req.set_id:
+        _require_set(_load_set(req.set_id), user)  # 个人集按归属；项目集按项目成员
         project_info = f"项目名称：{req.project_name}" if req.project_name else "项目名称：未指定"
         extra = f"\n补充信息：{req.extra_info}" if req.extra_info else ""
 
@@ -1401,6 +1510,9 @@ async def generate_briefing(req: BriefingRequest):
 
     # ===== 单图模式（原有逻辑） =====
     info = _load_context(req.file_id)
+    _require_file(req.file_id, info, user)
+    if req.project_id and not _is_project_member(req.project_id, user):
+        raise HTTPException(status_code=403, detail="您不是该项目成员")
     config = load_config()
     llm_service = LLMService()
 

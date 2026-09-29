@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from config import OUTPUT_DIR, DATA_DIR, WEB_ROOT, BUNDLE_DIR
+from config import DATA_DIR, WEB_ROOT, BUNDLE_DIR
 
 
 def _setup_logging():
@@ -113,8 +113,8 @@ async def health():
 
 
 # ===== 静态文件挂载 =====
-app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
-app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
+# 注意：严禁挂载 /data、/output —— DATA_DIR 含全部图纸/会话/密文对照表，
+# 裸挂载 = 无鉴权直取（绕过一切归属隔离）。图纸经 /api/drawing/*（带鉴权）访问。
 
 
 # ===== 前端 SPA（PC 前端 / + 移动前端 /m，双前端共存）=====
