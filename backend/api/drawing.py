@@ -227,15 +227,20 @@ def _vision_note(info: dict, has_image: bool, base: str) -> str:
 # ==================== 上传与图纸访问 ====================
 
 @router.post("/upload")
-async def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_current_user)):
-    """上传图纸（.dxf 直传；.dwg 自动转 DXF：ODA 优先 → LibreDWG 兜底；.pdf 矢量直渲）"""
+def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_current_user)):
+    """上传图纸（.dxf 直传；.dwg 自动转 DXF：ODA 优先 → LibreDWG 兜底；.pdf 矢量直渲）
+
+    注意：必须是同步 def（FastAPI 跑在线程池）。DWG 转换/解析/渲染是重 CPU 活，
+    若写 async def 会阻塞事件循环——一个大图在转换，整个 worker 的所有请求
+    （含健康检查、其他用户）全部卡住，2C2 worker 时并发两个上传就全站假死。
+    """
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in (".dxf", ".dwg", ".pdf"):
         raise HTTPException(status_code=400, detail="请上传 .dxf / .dwg / .pdf 格式文件")
 
     file_id = f"dxf_{uuid.uuid4().hex[:8]}"
     saved_path = UPLOAD_DIR / f"{file_id}{suffix}"
-    content = await file.read()
+    content = file.file.read()  # 同步端点用底层 SpooledTemporaryFile，不 await
     saved_path.write_bytes(content)
 
     converter_note = ""

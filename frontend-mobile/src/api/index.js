@@ -126,6 +126,8 @@ export const drawing = {
     formData.append('file', file)
     return api.post('/drawing/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000,  // 上传=同步解析（DWG转换+渲染），大图可达数分钟；
+                        // 默认30s必超时误报"网络异常"（nginx 499 实锤）。对齐 nginx proxy_read_timeout 600s
     })
   },
   chat: (data) => llmApi.post('/drawing/chat', data),
