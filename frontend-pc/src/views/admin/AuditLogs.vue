@@ -346,8 +346,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.page-header { margin-bottom: 16px; }
-.page-header h2 { margin: 0; font-size: 20px; }
 .stat-card { text-align: center; }
 .stat-num { font-size: 26px; font-weight: 600; color: #409eff; }
 .stat-label { font-size: 12px; color: #909399; margin-top: 4px; }

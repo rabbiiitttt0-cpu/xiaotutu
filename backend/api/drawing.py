@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from config import DATA_DIR
 from services.drawing_service import parse_dxf, render_dxf_png
 from services.llm_service import LLMService
-from config import load_config
+from config import load_config, resolve_provider_index
 from auth.deps import require_super_admin, get_current_user
 from auth.models import User
 from services import project_service
@@ -883,13 +883,14 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
     config = load_config()
     llm_service = LLMService()
     pidx = config.drawing_provider_index
+    locate_idx = resolve_provider_index(config, config.locate_provider_index)
     proj_id = srec.get("project_id") or 0
 
     prep = None
     if use_agents and config.agent_settings.snip_locate_enabled:
         try:
             prep = await _orchestrated_prep(question, history or [], sheets,
-                                            llm_service, pidx, proj_id)
+                                            llm_service, locate_idx, proj_id)
         except Exception:
             logging.getLogger("app").exception("[orchestrator] 图纸集定位失败，回退既有路由")
             prep = None
@@ -903,7 +904,7 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
         if len(sheets) <= 3:
             selected, route_reason = sheets, ""
         else:
-            selected, route_reason = await _route_sheets(sheets, question, llm_service, pidx)
+            selected, route_reason = await _route_sheets(sheets, question, llm_service, locate_idx)
 
     # PDF 深页路由：按问题检索全页文字层，命中页补渲染 + 文本摘录注入上下文
     for s in selected:
@@ -1214,7 +1215,7 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
                      "summary": ""}
             prep = await _orchestrated_prep(question_masked, history, [sheet],
                                             llm_service,
-                                            config.drawing_provider_index,
+                                            resolve_provider_index(config, config.locate_provider_index),
                                             req.project_id or 0)
         except Exception:
             logging.getLogger("app").exception("[orchestrator] 单图定位失败，回退默认图包")
@@ -1335,7 +1336,7 @@ async def extract_materials(req: MaterialRequest):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        provider_index=config.drawing_provider_index,
+        provider_index=resolve_provider_index(config, config.materials_provider_index),
         temperature=0.3,
         max_tokens=8192,
         module="drawing",
@@ -1458,7 +1459,7 @@ async def generate_briefing(req: BriefingRequest):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        provider_index=config.drawing_provider_index,
+        provider_index=resolve_provider_index(config, config.briefing_provider_index),
         temperature=0.5,
         max_tokens=8192,
         module="drawing",

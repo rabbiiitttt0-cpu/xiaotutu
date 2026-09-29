@@ -650,8 +650,6 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
 </script>
 
 <style scoped>
-.page-header { margin-bottom: 16px; }
-.page-header h2 { margin: 0; font-size: 20px; }
 .set-row {
   display: flex;
   align-items: center;

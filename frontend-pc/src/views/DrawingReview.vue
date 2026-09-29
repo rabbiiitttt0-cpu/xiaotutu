@@ -1459,6 +1459,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 页头/留白统一走 App.vue 全局规范，页面内不重复定义 */
 .drawing-layout {
   display: flex;
   gap: 16px;
@@ -1502,7 +1503,7 @@ onMounted(() => {
     max-height: 45vh;
     overflow-y: auto;
   }
-  .page-header h2 { font-size: 15px; line-height: 32px; padding: 0 12px; }
+  .page-header h2 { font-size: 15px; line-height: 32px; }   /* 水平对齐全局留白，不再单独加 padding */
   .hint-desktop { display: none; }   /* 手机切手势文案 */
   .hint-mobile { display: inline; }
 }

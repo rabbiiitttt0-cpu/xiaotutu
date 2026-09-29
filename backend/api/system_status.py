@@ -146,20 +146,33 @@ class ProviderUpdateRequest(BaseModel):
 
 @router.get("/llm-config")
 async def get_llm_config(user: User = Depends(require_super_admin)):
-    """完整 LLM 配置（含 API Key 脱敏）。仅超管。"""
+    """完整 LLM 配置（API Key 明文，仅超管）。仅超管。"""
     cfg = load_config()
     providers = []
     for i, p in enumerate(cfg.providers):
+        # 明文返回（页面仅超管可见 + 服务绑定 127.0.0.1）：设置页常驻显示 key，
+        # 且保存时原样回传，避免空串把已存 key 冲掉
         d = p.model_dump()
-        if d.get("api_key"):
-            d["api_key"] = d["api_key"][:4] + "****" + d["api_key"][-4:]
         d["index"] = i
         providers.append(d)
     return {
         "providers": providers,
         "drawing_provider_index": cfg.drawing_provider_index,
+        "locate_provider_index": cfg.locate_provider_index,
+        "profile_provider_index": cfg.profile_provider_index,
+        "materials_provider_index": cfg.materials_provider_index,
+        "briefing_provider_index": cfg.briefing_provider_index,
         "agent_settings": cfg.agent_settings.model_dump(),
     }
+
+
+# 各功能 provider 绑定字段（-1 = 跟随识图模型）
+_BINDINGS = [
+    "locate_provider_index",
+    "profile_provider_index",
+    "materials_provider_index",
+    "briefing_provider_index",
+]
 
 
 @router.put("/llm-config")
@@ -185,9 +198,64 @@ async def update_llm_config(body: dict, user: User = Depends(require_super_admin
             raise HTTPException(status_code=400, detail="drawing_provider_index 超出范围")
         cfg.drawing_provider_index = idx
 
+    # 各功能绑定：-1（跟随）或有效索引
+    for key in _BINDINGS:
+        if key in body:
+            idx = body[key]
+            if idx != -1 and not (0 <= idx < len(cfg.providers)):
+                raise HTTPException(status_code=400, detail=f"{key} 超出范围")
+            setattr(cfg, key, idx)
+
     if "agent_settings" in body:
         from config import AgentSettings
         cfg.agent_settings = AgentSettings(**body["agent_settings"])
 
     save_config(cfg)
     return {"ok": True}
+
+
+class ProviderTestRequest(BaseModel):
+    """测试单个模型连通性：index=已保存行的索引（api_key 脱敏时回查原值）；
+    直接传完整配置则按未保存的新行测试。"""
+    index: int | None = None
+    name: str = ""
+    provider: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+
+
+@router.post("/llm-config/test")
+async def test_llm_provider(req: ProviderTestRequest, user: User = Depends(require_super_admin)):
+    """测试模型连通性（发一条小消息），返回 成功/错误/延迟。仅超管。"""
+    from services.llm_service import create_provider
+
+    cfg = load_config()
+    if req.index is not None and 0 <= req.index < len(cfg.providers):
+        # 已保存行：以已存配置为底，页面上改过的字段覆盖
+        p = cfg.providers[req.index].model_dump()
+        for k in ("name", "provider", "base_url", "model"):
+            v = getattr(req, k)
+            if v:
+                p[k] = v
+        if not req.api_key or "****" in req.api_key:
+            pass  # 留空/脱敏 → 用已存 key
+        else:
+            p["api_key"] = req.api_key
+    else:
+        # 未保存的新行：全量用请求字段
+        if not req.provider:
+            raise HTTPException(status_code=400, detail="请先选择模型类型")
+        p = {"name": req.name or "未命名", "provider": req.provider,
+             "api_key": req.api_key, "base_url": req.base_url, "model": req.model}
+
+    pcfg = LLMProviderConfig(**p)
+    if not pcfg.api_key:
+        raise HTTPException(status_code=400, detail="未配置 API Key，无法测试")
+
+    provider = create_provider(pcfg)
+    ok, msg, latency = await provider.test_connection()
+    # 只回前120字，避免整段响应/报错刷屏
+    snippet = (msg or "")[:120]
+    return {"ok": ok, "message": snippet, "latency_ms": latency,
+            "model": pcfg.model, "provider": pcfg.provider}

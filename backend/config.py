@@ -65,8 +65,21 @@ class AppConfig(BaseModel):
     ])
     # 识图助手使用的 provider 索引
     drawing_provider_index: int = 0
+    # 各 Agent/功能的 provider 索引（-1 = 跟随识图模型）
+    locate_provider_index: int = -1    # 定位Agent + 图纸集路由（纯文本选图）
+    profile_provider_index: int = -1   # 画像Agent（预处理摘要/批次关系图）
+    materials_provider_index: int = -1 # 材料提取
+    briefing_provider_index: int = -1  # 快速交底
     agent_settings: AgentSettings = AgentSettings()
     asr: AsrSettings = AsrSettings()
+
+
+def resolve_provider_index(cfg: AppConfig, idx: int) -> int:
+    """把功能级 provider 索引解析为实际索引：-1/越界 → 识图模型"""
+    if 0 <= idx < len(cfg.providers):
+        return idx
+    d = cfg.drawing_provider_index
+    return d if 0 <= d < len(cfg.providers) else 0
 
 
 def load_config() -> AppConfig:

@@ -221,7 +221,14 @@ async function submitChangePassword() {
 <style>
 * { box-sizing: border-box; }
 html, body, #app { margin: 0; padding: 0; height: 100%; }
-body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; }
+/* 整体柔和化：圆角加大一档，削弱政企感（变量挂 body，确保覆盖 Element 的 :root 定义） */
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f6f7fa;
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+}
+.el-card { border-radius: 10px; }
 
 .app-shell { display: flex; height: 100vh; overflow: hidden; }
 
@@ -230,7 +237,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: #003a6e;
+  background: linear-gradient(180deg, #2f6fe4 0%, #1f5fce 100%);
   color: #fff;
 }
 .sidebar-header {
@@ -240,7 +247,7 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   padding: 18px 16px;
   border-bottom: 1px solid rgba(255,255,255,0.1);
 }
-.sidebar-logo { width: 28px; height: 28px; }
+.sidebar-logo { width: 36px; height: 36px; }
 .sidebar-title { font-size: 18px; font-weight: 600; }
 .sidebar-menu { flex: 1; padding: 12px 8px; overflow-y: auto; }
 .menu-item {
@@ -286,7 +293,26 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   min-width: 0;
   overflow: auto;
   background: #f5f7fa;
+  padding: 16px 20px 20px;   /* 统一工作区留白：所有模块与侧边栏/顶部间距一致 */
 }
+
+/* ===== 统一页头规范（全局，各模块共用，禁止各页面自定义） ===== */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 32px;   /* 与 header 内按钮同高，带按钮的页面标题不再下沉 */
+  font-weight: 600;
+  color: #303133;
+}
+
+/* 系统设置用的 border-card 标签页也按卡片规范圆角化（提高权重防 EP 默认样式覆盖） */
+.el-tabs.el-tabs--border-card { border-radius: 10px; overflow: hidden; }
 
 /* 移动端（窄屏）侧边栏折叠 */
 @media (max-width: 768px) {

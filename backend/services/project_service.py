@@ -347,8 +347,10 @@ def _post_process_drawing(drawing_id: int):
         masked_name = mask_text(filename, cmap)
         save_project_cipher(pdir, cmap)
         try:
+            from config import resolve_provider_index
             res = asyncio.run(profile_agent.summarize_drawing(
-                LLMService(), cfg.drawing_provider_index, info, masked_name))
+                LLMService(), resolve_provider_index(cfg, cfg.profile_provider_index),
+                info, masked_name))
         except Exception:
             logger.exception("[画像] 摘要生成失败 drawing=%s", drawing_id)
             res = None
@@ -426,8 +428,9 @@ async def abuild_project_relations(pid: int, force: bool = False) -> dict | None
             pass
     from services.llm_service import LLMService
     from services.agents import profile as profile_agent
+    from config import resolve_provider_index
     res = await profile_agent.build_relations(
-        LLMService(), cfg.drawing_provider_index, cards)
+        LLMService(), resolve_provider_index(cfg, cfg.profile_provider_index), cards)
     if not res:
         return None
     res["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

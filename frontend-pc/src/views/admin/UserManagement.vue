@@ -258,21 +258,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.user-management {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-.page-header h2 {
-  margin: 0;
-  font-size: 20px;
-  color: #303133;
-}
+/* 页头/留白统一走 App.vue 全局规范（原先 max-width 居中导致间距异于其他模块，已撤） */
 .toolbar {
   margin-bottom: 16px;
 }
