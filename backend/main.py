@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from config import DATA_DIR, WEB_ROOT, BUNDLE_DIR
+from http_cache import cached_file_response
 
 
 def _setup_logging():
@@ -160,11 +161,13 @@ if mobile_dist.exists():
         return FileResponse(str(m_index), headers=_NO_CACHE_HEADERS)
 
     @app.get("/m/{full_path:path}", include_in_schema=False)
-    async def mobile_spa(full_path: str):
+    async def mobile_spa(full_path: str, request: Request):
         file_path = mobile_dist / full_path
         if file_path.is_file():
-            return FileResponse(str(file_path))
-        return FileResponse(str(m_index), headers=_NO_CACHE_HEADERS)
+            # 字体 17.7MB：7 天内关机重开直接读本地缓存（换字体请改文件名破缓存）
+            cc = "public, max-age=604800" if full_path.startswith("fonts/") else None
+            return cached_file_response(request, file_path, cache_control=cc)
+        return cached_file_response(request, m_index, headers=_NO_CACHE_HEADERS)
 
 # PC 前端 SPA catch-all（最后注册，避免抢 /m）
 if frontend_dist.exists():
@@ -181,10 +184,13 @@ if frontend_dist.exists():
         return RedirectResponse("/m/", status_code=302)
 
     @app.api_route("/{full_path:path}", methods=["GET"], include_in_schema=False)
-    async def spa_catch_all(full_path: str):
+    async def spa_catch_all(full_path: str, request: Request):
         file_path = frontend_dist / full_path
         if file_path.is_file():
             if file_path.suffix in (".html", ".htm"):
-                return FileResponse(str(file_path), headers=_NO_CACHE_HEADERS)
-            return FileResponse(str(file_path))
-        return FileResponse(str(index_path), headers=_NO_CACHE_HEADERS)
+                return cached_file_response(request, file_path, headers=_NO_CACHE_HEADERS)
+            # 字体 17.7MB：7 天内关机重开直接读本地缓存（换字体请改文件名破缓存）；
+            # 其余静态文件带旧 ETag 重验回 304（不过期后全量重传 17.7MB）
+            cc = "public, max-age=604800" if full_path.startswith("fonts/") else None
+            return cached_file_response(request, file_path, cache_control=cc)
+        return cached_file_response(request, index_path, headers=_NO_CACHE_HEADERS)

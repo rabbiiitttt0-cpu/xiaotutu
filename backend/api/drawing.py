@@ -14,11 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from pydantic import BaseModel
 
 from config import DATA_DIR
+from http_cache import cached_file_response
 from services.drawing_service import parse_dxf, render_dxf_png
 from services.llm_service import LLMService
 from config import load_config, resolve_provider_index
@@ -414,8 +414,16 @@ def upload_dxf(file: UploadFile = File(...), user: User = Depends(get_current_us
     }
 
 
+def _cached_file(request: Request, path: Path, media_type: str):
+    """预览图/DXF 下发：private no-cache（可缓存但每次重验，内容一变立即生效）
+    + 命中 If-None-Match/If-Modified-Since 回 304（否则浏览器过期后会
+    全量重传——DXF 最大 72MB 实测重下 258s）"""
+    return cached_file_response(request, path, media_type=media_type,
+                                cache_control="private, no-cache")
+
+
 @router.get("/{file_id}/image")
-async def drawing_image(file_id: str, fmt: str = "",
+async def drawing_image(request: Request, file_id: str, fmt: str = "",
                         user: User = Depends(get_current_user)):
     """图纸渲染预览图（首页；路由 include 级已带登录认证，勿改裸静态挂载）。
     fmt=svg 时优先返回矢量预览（DXF 无限放大不糊；无 SVG 回退 PNG）"""
@@ -428,7 +436,7 @@ async def drawing_image(file_id: str, fmt: str = "",
             if dxf.exists():
                 render_dxf_png(str(dxf), str(UPLOAD_DIR / f"{file_id}.png"))
         if svg.exists():
-            return FileResponse(str(svg), media_type="image/svg+xml")
+            return _cached_file(request, svg, "image/svg+xml")
         raise HTTPException(status_code=404, detail="该图纸无矢量预览（非DXF或渲染失败）")
     pngs = _png_paths(file_id)
     if not pngs:
@@ -436,8 +444,8 @@ async def drawing_image(file_id: str, fmt: str = "",
     # 大图纸无 SVG 时的高清预览版（400dpi，_hi.png 不匹配 _p*.png 通配，LLM 不受影响）
     hi = UPLOAD_DIR / f"{file_id}_hi.png"
     if hi.exists():
-        return FileResponse(str(hi), media_type="image/png")
-    return FileResponse(str(pngs[0]), media_type="image/png")
+        return _cached_file(request, hi, "image/png")
+    return _cached_file(request, pngs[0], "image/png")
 
 
 def _project_dxf_source(file_id: str):
@@ -475,7 +483,7 @@ def _project_dxf_source(file_id: str):
 
 
 @router.get("/{file_id}/dxf")
-def drawing_dxf(file_id: str, user: User = Depends(get_current_user)):
+def drawing_dxf(request: Request, file_id: str, user: User = Depends(get_current_user)):
     """原始 DXF 下发（前端 dxf-viewer WebGL 矢量预览用；路由 include 级已带登录认证）。
     本地上传：DWG 同步转出的 .dxf 留在 UPLOAD_DIR。项目图纸：中间件已删，首访懒重建
     （见 _project_dxf_source）。PDF 无 DXF → 404，前端静默不显示矢量按钮。
@@ -486,19 +494,19 @@ def drawing_dxf(file_id: str, user: User = Depends(get_current_user)):
         src = _project_dxf_source(file_id)
         if src is None:
             raise HTTPException(status_code=404, detail="该图纸无 DXF 源文件")
-        return FileResponse(str(src), media_type="application/dxf")
-    return FileResponse(str(dxf), media_type="application/dxf")
+        return _cached_file(request, src, "application/dxf")
+    return _cached_file(request, dxf, "application/dxf")
 
 
 @router.get("/{file_id}/image/{n}")
-async def drawing_image_n(file_id: str, n: int,
+async def drawing_image_n(request: Request, file_id: str, n: int,
                           user: User = Depends(get_current_user)):
     """图纸渲染预览图第 n 页（PDF 多页图纸用）"""
     _require_file(file_id, _load_context(file_id), user)
     pngs = _png_paths(file_id)
     if not pngs or n < 1 or n > len(pngs):
         raise HTTPException(status_code=404, detail="预览图不存在")
-    return FileResponse(str(pngs[n - 1]), media_type="image/png")
+    return _cached_file(request, pngs[n - 1], "image/png")
 
 
 @router.get("/{file_id}/pages")
