@@ -101,7 +101,7 @@ export async function downloadWithAuth(path, filename) {
 
 const llmApi = axios.create({
   baseURL: '/api',
-  timeout: 120000, // LLM调用可能较慢
+  timeout: 600000, // 问答=多Agent定位+视觉问答，实测可超2分钟；默认120s会误报"回答失败"（nginx 499 实锤）。对齐 nginx proxy_read_timeout 600s（更长会被 nginx 先切断）
 })
 
 // LLM请求也注入Token
@@ -118,6 +118,14 @@ llmApi.interceptors.response.use(
   (response) => response,
   (error) => handle401WithRefresh(error, llmApi)
 )
+
+// 问答失败文案：超时/网络错误给中文友好提示，其余透传后端 detail
+export function chatErrMsg(e) {
+  if (e.response?.data?.detail) return e.response.data.detail
+  if (e.code === 'ECONNABORTED' || /timeout/i.test(e.message || '')) return '后端处理时间较长，请稍后重试'
+  if (!e.response) return '网络异常，请检查网络后重试'
+  return e.message
+}
 
 // ===== 识图 =====
 export const drawing = {
@@ -141,6 +149,7 @@ export const drawing = {
   image: (fileId) => api.get(`/drawing/${fileId}/image`, { responseType: 'blob' }),
   imageSvg: (fileId) => api.get(`/drawing/${fileId}/image?fmt=svg`, { responseType: 'blob' }),
   imageN: (fileId, n) => api.get(`/drawing/${fileId}/image/${n}`, { responseType: 'blob' }),
+  pages: (fileId) => api.get(`/drawing/${fileId}/pages`),
   usage: () => api.get('/drawing/usage'),
   createSet: (data) => api.post('/drawing/sets', data),
   getSet: (id) => api.get(`/drawing/sets/${id}`),

@@ -250,22 +250,22 @@
             <!-- 截图提问：框选图纸局部，针对该区域提问 -->
             <el-tooltip content="框选图纸局部，针对该区域提问（如：这样的桩还有多少？）" placement="bottom">
               <el-button
-                v-if="previewUrls.length" size="small" round
+                v-if="previewUrls.length && previewMode !== 'dxf'" size="small" round
                 :type="snipMode ? 'primary' : 'info'" plain
                 @click="snipMode = !snipMode"
               >
                 <el-icon><Crop /></el-icon> {{ snipMode ? '框选中…' : '截图提问' }}
               </el-button>
             </el-tooltip>
-            <!-- PNG/SVG 切换按钮（DXF 有矢量图时显示，默认 PNG） -->
-            <el-button
-              v-if="svgUrl" size="small" round
-              :type="previewMode === 'svg' ? 'primary' : 'info'"
-              plain
-              @click="previewMode = previewMode === 'svg' ? 'png' : 'svg'"
+            <!-- 预览格式切换：PNG 位图 / DXF 矢量(dxf-viewer WebGL)
+                 （SVG 已移除：matplotlib 出图把细线糊成等粗，观感差于位图） -->
+            <el-radio-group
+              v-if="dxfUrl" size="small" :model-value="previewMode"
+              @update:model-value="previewMode = $event"
             >
-              {{ previewMode === 'svg' ? 'SVG 矢量' : 'PNG 位图' }}
-            </el-button>
+              <el-radio-button value="png">PNG</el-radio-button>
+              <el-radio-button v-if="dxfUrl" value="dxf">DXF 矢量</el-radio-button>
+            </el-radio-group>
             <span v-if="previewUrls.length" style="font-size: 12px; color: #67c23a">
               <el-icon><View /></el-icon> 视觉模式已启用
             </span>
@@ -273,8 +273,16 @@
         </div>
       </template>
       <div v-if="previewUrls.length" class="preview-body">
+        <!-- DXF 矢量模式：dxf-viewer WebGL 画布（自带拖动/滚轮缩放/触控） -->
+        <div v-if="previewMode === 'dxf'" class="dxf-host" ref="dxfHostRef">
+          <div class="pz-hint dxf-hint">
+            <span>左键拖动 · 滚轮缩放 · 触控双指</span>
+          </div>
+          <div v-if="dxfLoading" class="dxf-loading">DXF 矢量解析中…（大图约数秒）</div>
+        </div>
         <!-- 自绘缩放拖动容器：滚轮缩放、按住拖动、双击复位 -->
         <div
+          v-else
           ref="pzRef" class="pz-container" :class="{ dragging: isDragging, snipping: snipMode }"
           @wheel.prevent="onZoom"
           @mousedown="startDrag" @mousemove="onDrag" @mouseup="endDrag" @mouseleave="endDrag"
@@ -531,9 +539,9 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { drawing as drawingApi, projects as projectsApi } from '../api'
+import { drawing as drawingApi, projects as projectsApi, chatErrMsg } from '../api'
 import { WavRecorder } from '../utils/wavRecorder'
 import TutorialOverlay from '../components/TutorialOverlay.vue'
 
@@ -669,7 +677,7 @@ async function applyProjectDrawings(withSummary) {
       selectSheet(data.sheets[0].file_id)
     }
     ElMessage.success('图纸已就绪（预处理秒开）')
-    if (withSummary) await autoSummarize()
+    if (withSummary) autoSummarize()  // 概述后台错峰执行，不阻塞选图流程
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || e.message)
   } finally {
@@ -690,6 +698,7 @@ const rightTab = ref('chat')
 const messages = ref([])
 const question = ref('')
 const chatLoading = ref(false)
+const summarizing = ref(false)  // 图纸概述后台生成中（错峰，不占用 chatLoading）
 const chatContainer = ref(null)
 
 // 材料表
@@ -756,12 +765,66 @@ let dragStart = null
 
 const sheetIdx = computed(() => sheets.value.findIndex(s => s.file_id === activeSheetId.value))
 
-// PNG/SVG 预览切换（默认 PNG；DXF 有 SVG 时右上角按钮可切矢量）
-const svgUrl = ref('')
+// 预览格式切换：PNG（默认）/ DXF（dxf-viewer WebGL 矢量）
+// SVG 已移除（2026-10-04）：matplotlib 出图细线糊成等粗，观感差，且与 DXF 矢量重复
 const previewMode = ref('png')
-const displaySrc = computed(() =>
-  previewMode.value === 'svg' && svgUrl.value ? svgUrl.value : previewUrls.value[pageIdx.value]
-)
+const displaySrc = computed(() => previewUrls.value[pageIdx.value])
+
+// ==================== DXF 矢量预览（dxf-viewer，浏览器 WebGL 渲染） ====================
+// DXF 源文件由 /drawing/{fid}/dxf 下发（blob 直喂，自带鉴权）；文字用 Noto Sans SC
+// （OFL 协议，public/fonts/）。dxf-viewer 自带平移/缩放/触控控件，无需自绘 pz 逻辑。
+const dxfUrl = ref('')
+const dxfHostRef = ref(null)
+const dxfLoading = ref(false)
+let dxfViewer = null
+let dxfLoadSeq = 0
+
+function destroyDxfViewer() {
+  dxfLoadSeq++  // 递增序列号，取消在途的 Load
+  dxfLoading.value = false
+  if (dxfViewer) {
+    try { dxfViewer.Destroy() } catch { /* 已销毁则忽略 */ }
+    dxfViewer = null
+  }
+}
+
+async function mountDxfViewer() {
+  destroyDxfViewer()
+  const seq = dxfLoadSeq
+  const url = dxfUrl.value
+  await nextTick()  // 等 dxf-host 渲染进 DOM（构造时要读容器尺寸）
+  if (!url || seq !== dxfLoadSeq || previewMode.value !== 'dxf' || !dxfHostRef.value) return
+  dxfLoading.value = true
+  try {
+    const { DxfViewer } = await import('dxf-viewer')
+    if (seq !== dxfLoadSeq || previewMode.value !== 'dxf' || !dxfHostRef.value) return
+    const viewer = new DxfViewer(dxfHostRef.value, { autoResize: true })
+    viewer.SetClearColor('#ffffff')  // 打印风格白底；黑白反转默认开，白色线自动转黑
+    dxfViewer = viewer
+    if (import.meta.env.DEV) window.__dxfViewer = viewer  // 本地调试钩子（构建产物不含）
+    await viewer.Load({
+      url,
+      fonts: ['/fonts/NotoSansSC-VF.ttf'],
+      workerFactory: () => new Worker(
+        new URL('../workers/dxfWorker.js', import.meta.url), { type: 'module' }),
+    })
+    if (seq === dxfLoadSeq) dxfLoading.value = false
+  } catch (e) {
+    console.error('[DXF 矢量] 加载失败：', e)
+    if (seq === dxfLoadSeq && previewMode.value === 'dxf') {
+      dxfLoading.value = false
+      ElMessage.warning('DXF 矢量渲染失败，已回退 PNG 预览')
+      previewMode.value = 'png'
+    }
+  }
+}
+
+watch(previewMode, (m) => {
+  if (m === 'dxf') mountDxfViewer()
+  else destroyDxfViewer()
+})
+
+onBeforeUnmount(destroyDxfViewer)
 
 function switchSheet(delta) {
   const i = sheetIdx.value + delta
@@ -779,7 +842,7 @@ function onZoom(e) {
   const cx = e.clientX - rect.left - rect.width / 2
   const cy = e.clientY - rect.top - rect.height / 2
   const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
-  const next = Math.min(8, Math.max(0.2, scale.value * factor))
+  const next = Math.min(10, Math.max(0.2, scale.value * factor))  // 上限1000%
   const k = next / scale.value
   pan.value = { x: cx - (cx - pan.value.x) * k, y: cy - (cy - pan.value.y) * k }
   scale.value = next
@@ -867,7 +930,7 @@ function onTouchMove(e) {
     const [a, b] = e.touches
     const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
     const factor = dist / touchState.dist
-    const next = Math.min(8, Math.max(0.2, touchState.startScale * factor))
+    const next = Math.min(10, Math.max(0.2, touchState.startScale * factor))  // 上限1000%，与滚轮一致
     const k = next / touchState.startScale
     pan.value = {
       x: touchState.cx - (touchState.cx - touchState.startPan.x) * k,
@@ -922,7 +985,7 @@ async function doSnipCrop() {
   const rect = snipRect.value
   snipRect.value = null
   try {
-    // 始终从 PNG 源图裁剪（SVG 模式下载体一致，但 SVG 无法直接裁像素）
+    // 始终从 PNG 源图裁剪（DXF 矢量模式下截图也取 PNG 位图——canvas 像素可直接裁）
     const img = await _loadImg(previewUrls.value[pageIdx.value])
     const box = pzRef.value.getBoundingClientRect()
     const cw = box.width, ch = box.height
@@ -990,23 +1053,22 @@ async function toggleVoice() {
 function _revokePreviews() {
   previewUrls.value.forEach(u => URL.revokeObjectURL(u))
   previewUrls.value = []
-  if (svgUrl.value) { URL.revokeObjectURL(svgUrl.value); svgUrl.value = '' }
+  if (dxfUrl.value) { URL.revokeObjectURL(dxfUrl.value); dxfUrl.value = '' }
 }
 
 async function loadPreview(fid) {
   _revokePreviews()
   currentPreviewFid.value = fid
   loadingPages = new Set()
-  svgUrl.value = ''
-  previewMode.value = 'png'  // 默认 PNG，右上角按钮可切 SVG
+  previewMode.value = 'png'  // 默认 PNG，右上角按钮可切 DXF 矢量
   pageIdx.value = 0
   pageTotal.value = 1
   try {
     const { data } = await drawingApi.image(fid)
     previewUrls.value.push(URL.createObjectURL(data))
-    // 静默探测 SVG 矢量预览（有则右上角出现切换按钮）
-    drawingApi.imageSvg(fid).then(({ data: svgData }) => {
-      if (svgData.type.includes('svg')) svgUrl.value = URL.createObjectURL(svgData)
+    // 静默探测 DXF 源文件（DWG/DXF 上传有，PDF 无 → 404 不显示矢量按钮）
+    drawingApi.dxfFile(fid).then(({ data }) => {
+      if (data && data.size > 0) dxfUrl.value = URL.createObjectURL(data)
     }).catch(() => {})
     // 多页（PDF 多页 / 多图框切片）：先取总页数，只预载前 3 页，其余翻页时懒加载
     // （切片图可能几十页，全量预载会把浏览器内存打爆）
@@ -1055,12 +1117,16 @@ function layerColor(index) {
 }
 
 function msgStyle(msg) {
+  // 窄屏（手动留在 PC 版的手机）收掉 60px 侧留白，避免消息区只剩几行宽
+  const narrow = typeof window !== 'undefined' && window.innerWidth <= 768
+  const userPad = narrow ? 16 : 60
+  const aiPad = narrow ? 16 : 60
   return {
     display: 'flex',
     justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
     marginBottom: '12px',
-    paddingLeft: msg.role === 'user' ? '60px' : '16px',
-    paddingRight: msg.role === 'user' ? '16px' : '60px',
+    paddingLeft: msg.role === 'user' ? userPad : '16px',
+    paddingRight: msg.role === 'user' ? '16px' : aiPad,
   }
 }
 
@@ -1180,9 +1246,9 @@ async function uploadFile() {
       // 先释放上传按钮（自动概述是慢速 LLM 调用，不阻塞继续追加）
       uploading.value = false
 
-      // 自动生成图纸集概述
+      // 自动生成图纸集概述：后台错峰执行，用户可立即提问（一期优化#6）
       await nextTick()
-      await autoSummarize()
+      autoSummarize()
     }
   } catch (e) {
     ElMessage.error('上传失败: ' + (e.response?.data?.detail || e.message))
@@ -1191,30 +1257,41 @@ async function uploadFile() {
   }
 }
 
+// 图纸概述：后台错峰执行（一期优化#6）——不占用 chatLoading，概述生成期间
+// 用户可立即提问；结果回填占位气泡，不打乱对话顺序
 async function autoSummarize() {
-  chatLoading.value = true
+  if (summarizing.value) return  // 防重复触发（切换图纸/上传并发调用）
+  summarizing.value = true
+  const placeholder = { role: 'assistant', content: '⏳ 图纸概述生成中…', pending: true }
+  messages.value.push(placeholder)
   const summaryQuestion = sheets.value.length > 1
     ? '请综观这套图纸，简要概括：1）这是哪个项目哪个分部的图纸（什么类型的构筑物）；2）套内各图幅分别表达什么；3）各图幅之间的关系（如总图与详图、平面与剖面、设计说明与结构图的对应、图号引用关系），便于后续跨图纸推理；4）有哪些关键的设计参数和标注。提示：各图幅的文件名通常就是图名，图中右下角图框（标题栏）含项目名称、专业、图名、图号、版本等，请以这些信息为主要依据。用简洁的语言总结。'
     : '请根据这张图纸的图层、实体类型和文字标注，简要概括这张图纸的大致内容，包括：1）这可能是什么类型的图纸；2）图中包含哪些主要元素；3）有哪些重要标注信息。提示：文件名通常就是图名，图中右下角图框（标题栏）含项目名称、专业、图名、图号、版本等，请以这些信息为主要依据。用简洁的语言总结。'
   try {
     const { data } = await drawingApi.chat(aiPayload({ question: summaryQuestion }))
     if (data.session_id) projSessionId.value = data.session_id  // 概述即入项目会话
-    messages.value.push({
+    const ans = {
       role: 'assistant',
       content: data.answer + '\n\n图纸读取完成！关于这套图纸你有什么想问的吗？可以直接向我提问。',
       referenced: data.referenced || [],
-    })
+    }
+    const i = messages.value.indexOf(placeholder)  // 占位回填；会话被切换则追加不覆盖
+    if (i >= 0) messages.value[i] = ans
+    else messages.value.push(ans)
     // 图纸集总览（含图幅关系）回写存库，后续跨图纸提问注入 prompt 辅助关系推理
     if (setId.value && data.answer) {
       drawingApi.saveSetSummary(setId.value, { summary: data.answer }).catch(() => {})
     }
   } catch (e) {
-    messages.value.push({
+    const i = messages.value.indexOf(placeholder)
+    const ans = {
       role: 'assistant',
       content: '图纸已读取完成。你可以问我关于这套图纸的任何问题。',
-    })
+    }
+    if (i >= 0) messages.value[i] = ans
+    else messages.value.push(ans)
   } finally {
-    chatLoading.value = false
+    summarizing.value = false
     await nextTick()
     scrollToBottom()
     // 保存会话
@@ -1251,7 +1328,7 @@ async function sendQuestion() {
     if (data.session_id) projSessionId.value = data.session_id  // 项目会话（服务端保留5天）
     snipBlobUrl.value = ''  // 截图随本次问题消费，不残留
   } catch (e) {
-    messages.value.push({ role: 'assistant', content: '抱歉，回答失败: ' + (e.response?.data?.detail || e.message) })
+    messages.value.push({ role: 'assistant', content: '抱歉，回答失败: ' + chatErrMsg(e) })
   } finally {
     chatLoading.value = false
     await nextTick()
@@ -1464,6 +1541,7 @@ onMounted(() => {
   display: flex;
   gap: 16px;
   height: calc(100vh - 130px);
+  height: calc(100dvh - 130px);   /* 移动浏览器工具栏收缩时不裁切底部 */
 }
 .drawing-left-card {
   width: 380px;
@@ -1506,6 +1584,9 @@ onMounted(() => {
   .page-header h2 { font-size: 15px; line-height: 32px; }   /* 水平对齐全局留白，不再单独加 padding */
   .hint-desktop { display: none; }   /* 手机切手势文案 */
   .hint-mobile { display: inline; }
+  /* 手机流量本应走 /m，此块仅为「留在 PC 版」的兜底：消息字号显式 14px、行距可控 */
+  .chat-messages { font-size: 14px; }
+  .chat-bubble { font-size: 14px; max-width: 92%; line-height: 1.55; }
 }
 .history-card {
   flex-shrink: 0;
@@ -1562,6 +1643,32 @@ onMounted(() => {
   border-radius: 4px;
 }
 .pz-container.dragging { cursor: grabbing; }
+/* DXF 矢量预览容器（dxf-viewer 会把 canvas 追加进来并接管交互） */
+.dxf-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: grab;
+  background: #fff;
+  border: 1px solid #e6e6e6;
+  border-radius: 4px;
+}
+.dxf-host .pz-hint { z-index: 5; }
+.dxf-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 6;
+  font-size: 13px;
+  color: #909399;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e6e6e6;
+  border-radius: 6px;
+  padding: 8px 16px;
+  pointer-events: none;
+}
 .snip-rect {
   position: absolute;
   border: 2px dashed #f56c6c;
@@ -1597,7 +1704,9 @@ onMounted(() => {
   height: 100%;
   object-fit: contain;  /* scale(1)=适配容器，缩放以此为基础 */
   user-select: none;
-  will-change: transform;
+  /* 勿加 will-change: transform——会把 <img src=*.svg> 钉成纹理层按布局分辨率
+     预栅格化，滚轮放大后 GPU 拉伸发糊（实测 605% 拉普拉斯方差 1697 vs
+     去掉后 5663）。transform 缩放本身走合成，去掉不损失拖动性能 */
 }
 .pz-pager {
   position: absolute;

@@ -56,7 +56,7 @@
 
     <!-- 底部：切换 PC 版 -->
     <div class="footer">
-      <a class="switch-link" :href="pcUrl">🖥️ 切换到 PC 版</a>
+      <a class="switch-link" :href="pcUrl" @click="onSwitchPc">🖥️ 切换到 PC 版</a>
     </div>
   </div>
 </template>
@@ -76,11 +76,20 @@ const loading = ref(false)
 const loginForm = reactive({ username: '', password: '' })
 const regForm = reactive({ username: '', password: '', display_name: '' })
 
-// PC 版地址：本地 dev 走 PC 前端端口；生产部署后由后端同源服务
+// PC 版地址：本地 dev 走 PC 前端端口（5174→7780）；生产走同源根路径
+// （生产 7780 是 docker 内部端口不对外，写死端口会 404/超时）
 const pcUrl = computed(() => {
   const loc = window.location
-  return `${loc.protocol}//${loc.hostname}:7780/login`
+  const isLocal = ['localhost', '127.0.0.1'].includes(loc.hostname)
+  return isLocal
+    ? `${loc.protocol}//${loc.hostname}:7780/login`
+    : `${loc.protocol}//${loc.hostname}/login`
 })
+
+function onSwitchPc() {
+  // 标记本次会话留在 PC 版，防止 PC index.html 的 UA 跳转把手机用户弹回 /m/
+  sessionStorage.setItem('use_pc', '1')
+}
 
 function onTabChange() {
   // 切换 tab 时清空 loading

@@ -1,127 +1,138 @@
 <template>
   <div class="drawing-page">
-    <!-- 顶部：logo 菜单 + 图幅切换 + 上传 -->
+    <!-- 面包屑顶栏：菜单 / 当前图纸名（点开预览）/ 图幅·切换 -->
     <div class="top-bar">
       <button class="logo-btn" @click="showLogoMenu = true">
         <img src="/logo.png" alt="菜单" class="logo-img" />
       </button>
-      <van-dropdown-menu v-if="sheets.length > 1">
-        <van-dropdown-item :model-value="activeSheetId" :options="sheetOptions" @change="onSheetChange" />
-      </van-dropdown-menu>
-      <span v-else class="top-title">{{ sheets[0]?.filename || '识图助手' }}</span>
-      <van-button size="small" type="primary" plain @click="openProjectPicker">项目图纸</van-button>
-      <van-button size="small" type="primary" plain @click="openUploader">上传图纸</van-button>
+      <button class="crumb" @click="onCrumbClick">
+        <template v-if="currentDrawingName">
+          <span class="crumb-text">{{ currentDrawingName }}</span>
+        </template>
+        <span v-else class="crumb-empty">请选择图纸 ↓</span>
+      </button>
+      <button v-if="sheets.length > 1" class="icon-btn" @click="showSheetMenu = true">
+        <van-icon name="apps-o" size="18" />
+      </button>
+      <button class="icon-btn" @click="openPicker('project')" title="切换图纸">
+        <van-icon name="exchange" size="18" />
+      </button>
     </div>
 
-    <!-- 图纸预览（触摸缩放拖动 + 滑动翻页） -->
-    <div class="preview-area" ref="previewRef" @touchstart.prevent="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd">
-      <img v-if="displaySrc" :src="displaySrc" class="preview-img" :style="imgStyle" />
-      <div v-else class="preview-empty" @click="openUploader">
-        <van-icon name="plus" size="48" color="#c8c9cc" />
-        <p>上传图纸开始识别</p>
+    <!-- 主区：图纸问答（常态下占据顶栏以下全部视口） -->
+    <div class="chat-area">
+      <div class="chat-messages" ref="chatRef">
+        <div v-if="!messages.length" class="chat-empty">
+          <p>{{ currentDrawingName ? '可以开始提问了' : '请先选择图纸' }}</p>
+          <van-button
+            v-if="!currentDrawingName" size="small" type="primary" plain
+            @click="openPicker('project')"
+          >选择图纸</van-button>
+        </div>
+        <div v-for="(msg, i) in messages" :key="i" :class="['msg', msg.role]">
+          <img v-if="msg.snip" :src="msg.snip" class="msg-snip" />
+          <!-- 回答渲染 Markdown（14px 阶梯约束见样式）；用户消息保持纯文本 -->
+          <div
+            v-if="msg.role === 'assistant'" class="msg-bubble md"
+            v-html="renderMd(msg.content)"
+          />
+          <div v-else class="msg-bubble">{{ msg.content }}</div>
+          <div v-if="msg.referenced?.length" class="msg-ref">
+            参考图幅：{{ msg.referenced.map(r => r.filename).join('、') }}
+          </div>
+        </div>
+        <div v-if="chatLoading" class="msg assistant">
+          <div class="msg-bubble">分析中…</div>
+        </div>
       </div>
-      <div v-if="displaySrc" class="zoom-hint">{{ Math.round(scale * 100) }}%</div>
-      <!-- 框选截图区域 -->
-      <div v-if="snipRect" class="snip-rect" :style="snipRectStyle" />
-      <!-- 多页指示器 + 翻页按钮 -->
-      <div v-if="displaySrc && previewUrls.length > 1" class="page-indicator">
-        <button class="page-btn" :disabled="pageIdx === 0" @click.stop="prevPage">‹</button>
-        <span class="page-text">{{ pageIdx + 1 }} / {{ previewUrls.length }}</span>
-        <button class="page-btn" :disabled="pageIdx >= previewUrls.length - 1" @click.stop="nextPage">›</button>
+
+      <div v-if="snipBlobUrl" class="snip-chip">
+        <img :src="snipBlobUrl" alt="框选截图" />
+        <span>已框选局部截图，提问将针对该区域</span>
+        <van-icon name="close" @click="snipBlobUrl = ''" />
+      </div>
+
+      <div class="chat-input">
+        <van-button
+          size="small" type="primary" :plain="!snipMode"
+          @click="startSnipPreview"
+        >{{ snipMode ? '框选中' : '截图' }}</van-button>
+        <van-field
+          ref="questionFieldRef"
+          v-model="question"
+          placeholder="输入问题，或点🎤语音"
+          :border="false"
+          @keyup.enter="sendQuestion"
+        />
+        <van-button size="small" :type="recognizing ? 'danger' : 'primary'"
+          icon="service-o" :loading="voiceUploading" @click="toggleVoice" />
+        <van-button size="small" type="primary" :loading="chatLoading" @click="sendQuestion">发送</van-button>
       </div>
     </div>
 
-    <!-- 底部：功能 tab -->
-    <div class="bottom-panel" :class="{ 'upload-open': showUploader }">
-      <van-tabs v-model:active="activeTab" shrink>
-        <van-tab title="问答" name="chat">
-          <div class="chat-panel">
-            <div class="chat-messages" ref="chatRef">
-              <div v-if="!messages.length" class="chat-empty">上传图纸后，这里可以提问</div>
-              <div v-for="(msg, i) in messages" :key="i" :class="['msg', msg.role]">
-                <img v-if="msg.snip" :src="msg.snip" class="msg-snip" />
-                <div class="msg-bubble">{{ msg.content }}</div>
-                <div v-if="msg.referenced?.length" class="msg-ref">
-                  参考图幅：{{ msg.referenced.map(r => r.filename).join('、') }}
-                </div>
-              </div>
-              <div v-if="chatLoading" class="msg assistant"><div class="msg-bubble">分析中…</div></div>
-            </div>
-            <!-- 内联上传区（不遮挡问答输入框） -->
-            <div v-if="showUploader" class="upload-inline">
-              <div class="upload-inline-head">
-                <span class="upload-inline-title">上传图纸</span>
-                <van-icon name="cross" size="18" color="#969799" @click="showUploader = false" />
-              </div>
-              <van-uploader :after-read="onFileRead" multiple accept=".dxf,.dwg,.pdf" />
-              <p class="uploader-tip">支持 .dxf / .dwg / .pdf，可多选组成图纸集</p>
-              <div v-if="fileList.length" class="file-list">
-                <div v-for="(f, i) in fileList" :key="i" class="file-item">
-                  <span>{{ f.name }}</span>
-                  <van-icon name="close" @click="fileList.splice(i, 1)" />
-                </div>
-              </div>
-              <van-button type="primary" block round size="small" :loading="uploading" @click="doUpload" style="margin-top: 8px">
-                {{ uploading ? '解析中…' : '解析图纸' }}
-              </van-button>
-            </div>
-            <div v-if="snipBlobUrl" class="snip-chip">
-              <img :src="snipBlobUrl" alt="框选截图" />
-              <span>已框选局部截图，提问将针对该区域</span>
-              <van-icon name="close" @click="snipBlobUrl = ''" />
-            </div>
-            <div class="chat-input">
-              <van-button
-                size="small" type="primary" :plain="!snipMode"
-                @click="snipMode ? (snipMode = false) : enterSnipMode()"
-              >{{ snipMode ? '取消框选' : '截图' }}</van-button>
-              <van-field
-                v-model="question"
-                placeholder="输入问题，或点🎤语音"
-                :border="false"
-                @keyup.enter="sendQuestion"
-              />
-              <van-button size="small" :type="recognizing ? 'danger' : 'primary'"
-                icon="service-o" :loading="voiceUploading" @click="toggleVoice" />
-              <van-button size="small" type="primary" :loading="chatLoading" @click="sendQuestion">发送</van-button>
-            </div>
-          </div>
-        </van-tab>
+    <!-- 预览态：遮罩覆盖问答区（两态互斥，关闭后问答状态原样保留） -->
+    <van-popup
+      :show="showPreview" position="top" close-on-click-overlay
+      :style="{ height: 'calc(100% - 44px)', marginTop: '44px' }"
+      @update:show="onPreviewShow"
+    >
+      <div class="preview-wrap">
+        <div class="preview-head">
+          <button class="ph-close" @click="closePreview">✕ 关闭</button>
+          <span class="ph-title">{{ currentDrawingName }}</span>
+          <span v-if="displaySrc" class="ph-zoom">{{ Math.round(scale * 100) }}%</span>
+          <span v-if="displaySrc && previewUrls.length > 1" class="ph-pages">
+            <button class="page-btn" :disabled="pageIdx === 0" @click="prevPage">‹</button>
+            <span class="page-text">{{ pageIdx + 1 }} / {{ previewUrls.length }}</span>
+            <button class="page-btn" :disabled="pageIdx >= previewUrls.length - 1" @click="nextPage">›</button>
+          </span>
+        </div>
 
-        <van-tab title="材料" name="materials">
-          <div class="sub-panel">
-            <van-button size="small" type="primary" plain @click="extractMaterials" :loading="materialsLoading">
-              {{ materials.length ? '重新提取' : '提取材料表' }}
+        <div
+          class="preview-area" ref="previewRef"
+          @touchstart.prevent="onTouchStart" @touchmove.prevent="onTouchMove" @touchend="onTouchEnd"
+        >
+          <img v-if="displaySrc" :src="displaySrc" class="preview-img" :style="imgStyle" />
+          <div v-else class="preview-empty" @click="openPicker('upload')">
+            <van-icon name="plus" size="48" color="#c8c9cc" />
+            <p>暂无图纸，点此上传</p>
+          </div>
+          <div v-if="snipRect" class="snip-rect" :style="snipRectStyle" />
+        </div>
+
+        <!-- 轻量底栏：截图确认动作（框选→回问答提问） -->
+        <div class="preview-foot">
+          <template v-if="snipBlobUrl">
+            <img :src="snipBlobUrl" class="foot-snip" />
+            <van-button size="small" type="primary" @click="closePreview">去提问</van-button>
+            <van-button size="small" plain @click="snipBlobUrl = ''; enterSnipMode()">重选区域</van-button>
+          </template>
+          <template v-else>
+            <van-button size="small" type="primary" :plain="!snipMode" @click="snipMode ? (snipMode = false) : enterSnipMode()">
+              {{ snipMode ? '拖动框选中…' : '框选截图提问' }}
             </van-button>
-            <van-empty v-if="!materials.length" description="点击上方提取材料" />
-            <div v-else class="materials-list">
-              <div v-for="(m, i) in materials" :key="i" class="material-item">
-                <div class="m-name">{{ m.name }}</div>
-                <div class="m-spec">{{ m.spec || '—' }} · {{ m.unit || '' }}</div>
-              </div>
-            </div>
-          </div>
-        </van-tab>
+            <span class="foot-tip">双指缩放 · 拖动查看 · 翻页</span>
+          </template>
+        </div>
+      </div>
+    </van-popup>
 
-        <van-tab title="交底" name="briefing">
-          <div class="sub-panel">
-            <van-field v-model="briefingProjectName" label="项目名称" placeholder="可选" />
-            <van-button size="small" type="primary" plain @click="generateBriefing" :loading="briefingLoading">
-              {{ briefingContent ? '重新生成' : '生成交底文件' }}
-            </van-button>
-            <div v-if="briefingContent" class="briefing-content">{{ briefingContent }}</div>
-          </div>
-        </van-tab>
-      </van-tabs>
-    </div>
-
-    <!-- logo 菜单：切换端 / 账号信息 / 修改密码 / 退出登录 -->
+    <!-- ≡ 菜单：图纸切换 / 历史 / 预览 / 材料 / 交底 / 账号 -->
     <van-action-sheet
       v-model:show="showLogoMenu"
       :actions="logoMenuActions"
       cancel-text="取消"
       close-on-click-action
       @select="onLogoMenuSelect"
+    />
+
+    <!-- 多图幅切换 -->
+    <van-action-sheet
+      v-model:show="showSheetMenu"
+      :actions="sheetActions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="onSheetMenuSelect"
     />
 
     <!-- 账号信息弹窗 -->
@@ -167,134 +178,233 @@
       </div>
     </van-popup>
 
-
-    <!-- 项目图纸弹窗（预处理秒开 + 图纸集 + 5天会话） -->
-    <van-popup v-model:show="showProjectPicker" position="bottom" round :style="{ maxHeight: '75%' }">
+    <!-- 选图弹窗：项目图纸 / 本地上传 两源并列（预处理秒开 + 图纸集 + 5天会话） -->
+    <van-popup v-model:show="showProjectPicker" position="bottom" round :style="{ maxHeight: '80%' }">
       <div class="uploader-panel">
-        <h4>项目图纸</h4>
-        <van-dropdown-menu v-if="myProjects.length">
-          <van-dropdown-item
-            :model-value="activeProjectId" :options="projectOptions"
-            @change="onProjectChange"
-          />
-        </van-dropdown-menu>
-        <van-empty v-else description="您还未加入任何项目，请联系管理员" image-size="60" />
+        <div class="pick-toggle">
+          <button :class="['pick-toggle-btn', { active: pickerSource === 'project' }]" @click="pickerSource = 'project'">项目图纸</button>
+          <button :class="['pick-toggle-btn', { active: pickerSource === 'upload' }]" @click="pickerSource = 'upload'">本地上传</button>
+        </div>
 
-        <template v-if="activeProjectId">
-          <!-- 5天内会话 -->
-          <template v-if="projSessions.length">
-            <p class="uploader-tip" style="margin-bottom: 4px">最近会话（5天内，含上下文）</p>
-            <div
-              v-for="s in projSessions" :key="s.id" class="file-item"
-              @click="restoreSession(s)"
-            >
-              <span>{{ s.title || '未命名会话' }} · {{ s.message_count }}条</span>
-              <span style="color: #c8c9cc; font-size: 12px">至{{ s.expires_at.slice(5, 10) }}</span>
+        <!-- 本地上传 -->
+        <template v-if="pickerSource === 'upload'">
+          <div class="upload-block">
+            <van-uploader :after-read="onFileRead" multiple accept=".dxf,.dwg,.pdf" />
+            <p class="uploader-tip">支持 .dxf / .dwg / .pdf，可多选组成图纸集</p>
+            <div v-if="fileList.length" class="file-list">
+              <div v-for="(f, i) in fileList" :key="i" class="file-item">
+                <span>{{ f.name }}</span>
+                <van-icon name="close" @click="fileList.splice(i, 1)" />
+              </div>
             </div>
-          </template>
-
-          <!-- 选图纸 / 图纸集 切换 -->
-          <div class="pick-toggle">
-            <button :class="['pick-toggle-btn', { active: projPickMode === 'browse' }]" @click="projPickMode = 'browse'">选图纸</button>
-            <button :class="['pick-toggle-btn', { active: projPickMode === 'sets' }]" @click="projPickMode = 'sets'">图纸集</button>
+            <van-button type="primary" block round size="small" :loading="uploading" @click="doUpload" style="margin-top: 8px">
+              {{ uploading ? '解析中…' : '解析图纸' }}
+            </van-button>
           </div>
-
-          <!-- 图纸集模式：点一个整组载入（管理员预设） -->
-          <template v-if="projPickMode === 'sets'">
-            <van-empty
-              v-if="!projSets.length" image-size="40"
-              description="暂无图纸集，请联系管理员在项目管理中预设"
-            />
-            <div
-              v-for="s in projSets" :key="s.id" class="file-item"
-              @click="selectedDrawingIds = [...s.drawing_ids]; applyProjectDrawings()"
-            >
-              <span>📁 {{ s.name }}</span>
-              <span style="color: #c8c9cc; font-size: 12px">{{ s.drawing_ids.length }}张</span>
-            </div>
-          </template>
-
-          <!-- 选图纸模式：按压缩包目录结构分组折叠 -->
-          <template v-else>
-            <div style="display: flex; justify-content: space-between; align-items: center">
-              <p class="uploader-tip" style="margin: 4px 0">图纸（{{ showAll ? '全部' : '近期常用' }}）</p>
-              <van-switch :model-value="showAll" size="20px" @update:model-value="showAll = $event" />
-            </div>
-            <div style="max-height: 200px; overflow-y: auto">
-              <van-checkbox-group v-model="selectedDrawingIds">
-                <template v-for="g in drawingGroups" :key="g.key">
-                  <div class="dg-head" @click="toggleGroup(g)">
-                    <span style="font-weight: 600">{{ g.name }}</span>
-                    <span style="color: #969799; font-size: 12px">（{{ g.files.length }} 张）</span>
-                    <van-icon :name="collapsedGroups[g.key] ? 'arrow-down' : 'arrow-up'" size="14" color="#969799" style="margin-left: auto" />
-                  </div>
-                  <template v-if="!collapsedGroups[g.key]">
-                    <van-checkbox
-                      v-for="f in g.files" :key="f.id" :name="f.id"
-                      style="padding: 6px 4px 6px 16px"
-                    >
-                      {{ f.filename }}
-                      <van-tag v-if="f.is_frequent" type="warning" size="medium">常用</van-tag>
-                    </van-checkbox>
-                  </template>
-                </template>
-                <van-empty
-                  v-if="!drawingGroups.length" image-size="40"
-                  :description="showAll ? '项目暂无已处理图纸' : '暂无常用图纸，打开开关看全部'"
-                />
-              </van-checkbox-group>
-            </div>
-          </template>
-
-          <van-button
-            type="primary" block round style="margin-top: 12px"
-            :disabled="!selectedDrawingIds.length" :loading="projApplying"
-            @click="applyProjectDrawings"
-          >
-            开始问答（已选 {{ selectedDrawingIds.length }} 张）
-          </van-button>
         </template>
+
+        <!-- 项目图纸 -->
+        <template v-else>
+          <van-dropdown-menu v-if="myProjects.length">
+            <van-dropdown-item
+              :model-value="activeProjectId" :options="projectOptions"
+              @change="onProjectChange"
+            />
+          </van-dropdown-menu>
+          <van-empty v-else description="您还未加入任何项目，请联系管理员" image-size="60" />
+
+          <template v-if="activeProjectId">
+            <!-- 5天内会话 -->
+            <template v-if="projSessions.length">
+              <p class="uploader-tip" style="margin-bottom: 4px">最近会话（5天内，含上下文）</p>
+              <div
+                v-for="s in projSessions" :key="s.id" class="file-item"
+                @click="restoreSession(s)"
+              >
+                <span>{{ s.title || '未命名会话' }} · {{ s.message_count }}条</span>
+                <span style="color: #c8c9cc; font-size: 12px">至{{ s.expires_at.slice(5, 10) }}</span>
+              </div>
+            </template>
+
+            <!-- 选图纸 / 图纸集 切换 -->
+            <div class="pick-toggle">
+              <button :class="['pick-toggle-btn', { active: projPickMode === 'browse' }]" @click="projPickMode = 'browse'">选图纸</button>
+              <button :class="['pick-toggle-btn', { active: projPickMode === 'sets' }]" @click="projPickMode = 'sets'">图纸集</button>
+            </div>
+
+            <!-- 图纸集模式：点一个整组载入（管理员预设） -->
+            <template v-if="projPickMode === 'sets'">
+              <van-empty
+                v-if="!projSets.length" image-size="40"
+                description="暂无图纸集，请联系管理员在项目管理中预设"
+              />
+              <div
+                v-for="s in projSets" :key="s.id" class="file-item"
+                @click="selectedDrawingIds = [...s.drawing_ids]; applyProjectDrawings()"
+              >
+                <span>📁 {{ s.name }}</span>
+                <span style="color: #c8c9cc; font-size: 12px">{{ s.drawing_ids.length }}张</span>
+              </div>
+            </template>
+
+            <!-- 选图纸模式：按压缩包目录结构分组折叠 -->
+            <template v-else>
+              <div style="display: flex; justify-content: space-between; align-items: center">
+                <p class="uploader-tip" style="margin: 4px 0">图纸（{{ showAll ? '全部' : '近期常用' }}）</p>
+                <van-switch :model-value="showAll" size="20px" @update:model-value="showAll = $event" />
+              </div>
+              <div style="max-height: 200px; overflow-y: auto">
+                <van-checkbox-group v-model="selectedDrawingIds">
+                  <template v-for="g in drawingGroups" :key="g.key">
+                    <div class="dg-head" @click="toggleGroup(g)">
+                      <span style="font-weight: 600">{{ g.name }}</span>
+                      <span style="color: #969799; font-size: 12px">（{{ g.files.length }} 张）</span>
+                      <van-icon :name="collapsedGroups[g.key] ? 'arrow-down' : 'arrow-up'" size="14" color="#969799" style="margin-left: auto" />
+                    </div>
+                    <template v-if="!collapsedGroups[g.key]">
+                      <van-checkbox
+                        v-for="f in g.files" :key="f.id" :name="f.id"
+                        style="padding: 6px 4px 6px 16px"
+                      >
+                        {{ f.filename }}
+                        <van-tag v-if="f.is_frequent" type="warning" size="medium">常用</van-tag>
+                      </van-checkbox>
+                    </template>
+                  </template>
+                  <van-empty
+                    v-if="!drawingGroups.length" image-size="40"
+                    :description="showAll ? '项目暂无已处理图纸' : '暂无常用图纸，打开开关看全部'"
+                  />
+                </van-checkbox-group>
+              </div>
+            </template>
+
+            <van-button
+              type="primary" block round style="margin-top: 12px"
+              :disabled="!selectedDrawingIds.length" :loading="projApplying"
+              @click="applyProjectDrawings"
+            >
+              开始问答（已选 {{ selectedDrawingIds.length }} 张）
+            </van-button>
+          </template>
+        </template>
+      </div>
+    </van-popup>
+
+    <!-- 材料表面板（菜单唤出，非常驻 tab） -->
+    <van-popup
+      :show="panelView === 'materials'" position="bottom" round :style="{ maxHeight: '75%' }"
+      @update:show="v => !v && (panelView = '')"
+    >
+      <div class="uploader-panel">
+        <h4>材料表</h4>
+        <van-button size="small" type="primary" plain @click="extractMaterials" :loading="materialsLoading">
+          {{ materials.length ? '重新提取' : '提取材料表' }}
+        </van-button>
+        <van-empty v-if="!materials.length" description="点击上方提取材料" />
+        <div v-else class="materials-list">
+          <div v-for="(m, i) in materials" :key="i" class="material-item">
+            <div class="m-name">{{ m.name }}</div>
+            <div class="m-spec">{{ m.spec || '—' }} · {{ m.unit || '' }}</div>
+          </div>
+        </div>
+      </div>
+    </van-popup>
+
+    <!-- 交底面板（菜单唤出，非常驻 tab） -->
+    <van-popup
+      :show="panelView === 'briefing'" position="bottom" round :style="{ maxHeight: '75%' }"
+      @update:show="v => !v && (panelView = '')"
+    >
+      <div class="uploader-panel">
+        <h4>快速交底</h4>
+        <van-field v-model="briefingProjectName" label="项目名称" placeholder="可选" />
+        <van-button size="small" type="primary" plain @click="generateBriefing" :loading="briefingLoading" style="margin-top: 8px">
+          {{ briefingContent ? '重新生成' : '生成交底文件' }}
+        </van-button>
+        <div v-if="briefingContent" class="briefing-content">{{ briefingContent }}</div>
       </div>
     </van-popup>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { showToast, showSuccessToast } from 'vant'
-import { drawing as drawingApi, projects as projectsApi } from '../api'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
+import { drawing as drawingApi, projects as projectsApi, chatErrMsg } from '../api'
 import { WavRecorder } from '../utils/wavRecorder'
 import { auth as authApi } from '../api/auth'
 import { useAuthStore } from '../stores/auth'
 
 const authStore = useAuthStore()
 
-// 上传
-const showUploader = ref(false)
-const fileList = ref([])
-
-// 打开内联上传区：切到问答 tab 并展开，保持输入框可见
-function openUploader() {
-  activeTab.value = 'chat'
-  showUploader.value = true
+marked.setOptions({ breaks: true })
+function renderMd(text) {
+  try { return DOMPurify.sanitize(marked.parse(text || '')) } catch { return '' }
 }
+
+// ===== 两态互斥：常态=问答区为绝对主体；预览=遮罩覆盖问答区 =====
+const showPreview = ref(false)
+
+function onPreviewShow(v) { if (!v) closePreview() }
+function closePreview() {
+  showPreview.value = false
+  snipMode.value = false
+  snipRect.value = null
+  snipStart = null
+}
+function onCrumbClick() {
+  if (displaySrc.value) showPreview.value = true
+  else openPicker('project')
+}
+
+// ===== 选图弹窗：项目图纸 / 本地上传 =====
+const showProjectPicker = ref(false)
+const pickerSource = ref('project')   // project 项目图纸 | upload 本地上传
+const fileList = ref([])
 const uploading = ref(false)
 
-// logo 菜单 + 修改密码
-const showLogoMenu = ref(false)
-const showAccountInfo = ref(false)
-const showPwdPopup = ref(false)
-const pwdSubmitting = ref(false)
-const pwdForm = ref({ old_password: '', new_password: '', confirm_password: '' })
+function openPicker(source = 'project') {
+  pickerSource.value = source
+  showProjectPicker.value = true
+  if (source === 'project') loadMyProjects()
+}
+
 const logoMenuActions = [
+  { name: '切换图纸', key: 'switch-drawing' },
+  { name: '历史会话', key: 'history' },
+  { name: '图纸预览', key: 'preview' },
+  { name: '材料表', key: 'materials' },
+  { name: '交底', key: 'briefing' },
   { name: '切换为电脑端', key: 'switch-pc' },
   { name: '账号信息', key: 'account-info' },
   { name: '修改密码', key: 'change-pwd' },
   { name: '退出登录', key: 'logout', color: '#ee0a24' },
 ]
+const showLogoMenu = ref(false)
+const showAccountInfo = ref(false)
+const showPwdPopup = ref(false)
+const pwdSubmitting = ref(false)
+const pwdForm = ref({ old_password: '', new_password: '', confirm_password: '' })
+const panelView = ref('')   // '' | materials | briefing
 
 function onLogoMenuSelect(action) {
-  if (action.key === 'switch-pc') {
+  if (action.key === 'switch-drawing') {
+    openPicker('project')
+  } else if (action.key === 'history') {
+    projPickMode.value = 'browse'
+    openPicker('project')
+  } else if (action.key === 'preview') {
+    if (displaySrc.value) showPreview.value = true
+    else { showToast('请先选择图纸'); openPicker('project') }
+  } else if (action.key === 'materials' || action.key === 'briefing') {
+    if (!activeSheetId.value) { showToast('请先选择图纸'); openPicker('project'); return }
+    panelView.value = action.key
+  } else if (action.key === 'switch-pc') {
+    // 标记本次会话留在 PC 版，否则 PC index.html 的 UA 跳转会把手机用户弹回 /m/
+    sessionStorage.setItem('use_pc', '1')
     window.location.href = '/pc'
   } else if (action.key === 'account-info') {
     showAccountInfo.value = true
@@ -330,6 +440,27 @@ async function submitChangePassword() {
 const setId = ref('')
 const sheets = ref([])
 const activeSheetId = ref('')
+const showSheetMenu = ref(false)
+
+// 面包屑：项目名 / 图纸名（点它唤预览）
+const currentDrawingName = computed(() => {
+  if (activeSheetId.value) {
+    const s = sheets.value.find(x => x.file_id === activeSheetId.value)
+    const base = s?.filename || '图纸'
+    const proj = myProjects.value.find(p => p.id === activeProjectId.value)
+    return proj ? `${proj.name} / ${base}` : base
+  }
+  if (sheets.value.length) return `图纸集 · ${sheets.value.length} 张`
+  return ''
+})
+
+const sheetActions = computed(() =>
+  sheets.value.map(s => ({ name: s.filename, key: s.file_id })))
+
+function onSheetMenuSelect(action) {
+  showSheetMenu.value = false
+  onSheetChange(action.key)
+}
 
 // 预览
 const previewRef = ref(null)
@@ -344,11 +475,22 @@ const imgStyle = computed(() => ({
 }))
 
 // 问答
-const activeTab = ref('chat')
 const messages = ref([])
 const question = ref('')
 const chatLoading = ref(false)
+const summarizing = ref(false)  // 图纸概述后台生成中（错峰，不占用 chatLoading）
 const chatRef = ref(null)
+const questionFieldRef = ref(null)
+
+watch(() => messages.value.length, async () => {
+  await nextTick()
+  const el = chatRef.value
+  if (el) el.scrollTop = el.scrollHeight
+})
+
+function focusInput() {
+  nextTick(() => questionFieldRef.value?.focus?.())
+}
 
 // 材料/交底
 const materials = ref([])
@@ -356,8 +498,6 @@ const materialsLoading = ref(false)
 const briefingProjectName = ref('')
 const briefingContent = ref('')
 const briefingLoading = ref(false)
-
-const sheetOptions = computed(() => sheets.value.map(s => ({ text: s.filename, value: s.file_id })))
 
 function onFileRead(file) {
   fileList.value.push(file.file)
@@ -381,9 +521,10 @@ async function doUpload() {
       activeSheetId.value = sheets.value[0]?.file_id
       await selectSheet(activeSheetId.value)
       fileList.value = []
-      showUploader.value = false
+      showProjectPicker.value = false
       showSuccessToast(`图纸集已就绪（${sheets.value.length} 张）`)
-      await autoSummarize()
+      focusInput()
+      autoSummarize()  // 概述后台错峰执行，可立即提问（一期优化#6）
     }
   } catch (e) {
     showToast('上传失败: ' + (e.response?.data?.detail || e.message))
@@ -412,11 +553,12 @@ async function selectSheet(fid) {
   snipBlobUrl.value = ''
   snipRect.value = null
   try {
-    // 获取图纸信息（含总页数）
+    // 总页数走 /drawing/{file_id}/pages（按缓存 file_id 查）；
+    // drawingInfo 路由要 int 图纸 id，传 pd_ 缓存 id 会 422，这里不能用
     try {
-      const infoRes = await projectsApi.drawingInfo(activeProjectId.value, fid)
+      const pg = await drawingApi.pages(fid)
       if (token !== sheetReqToken) return
-      totalPages.value = infoRes.data.image_count || 1
+      totalPages.value = pg.data.count || 1
     } catch { totalPages.value = 1 }
 
     // 加载第一页
@@ -449,7 +591,6 @@ function aiPayload(extra) {
 }
 
 // ===== 项目图纸模式 =====
-const showProjectPicker = ref(false)
 const myProjects = ref([])
 const activeProjectId = ref(0)
 const projTree = ref([])
@@ -494,8 +635,7 @@ function toggleGroup(g) {
   collapsedGroups.value[g.key] = !collapsedGroups.value[g.key]
 }
 
-async function openProjectPicker() {
-  showProjectPicker.value = true
+async function loadMyProjects() {
   try {
     const { data } = await projectsApi.mine()
     myProjects.value = data
@@ -541,7 +681,8 @@ async function applyProjectDrawings() {
     await selectSheet(activeSheetId.value)
     showProjectPicker.value = false
     showSuccessToast(`图纸已就绪（${sheets.value.length} 张）`)
-    await autoSummarize()
+    focusInput()   // 选完即问
+    autoSummarize()  // 概述后台错峰执行（一期优化#6）
   } catch (e) {
     showToast(e.response?.data?.detail || e.message)
   } finally {
@@ -566,19 +707,31 @@ async function restoreSession(s) {
     messages.value = data.messages || []
     showProjectPicker.value = false
     showSuccessToast(`已恢复会话（保留至 ${data.expires_at.slice(0, 10)}）`)
+    focusInput()
   } catch (e) {
     showToast(e.response?.data?.detail || '恢复会话失败')
   }
 }
 
+// 图纸概述：后台错峰执行（一期优化#6）——不占用 chatLoading，概述生成期间可立即提问
 async function autoSummarize() {
-  chatLoading.value = true
+  if (summarizing.value) return  // 防重复触发
+  summarizing.value = true
+  const placeholder = { role: 'assistant', content: '⏳ 图纸概述生成中…', pending: true }
+  messages.value.push(placeholder)
   try {
     const { data } = await drawingApi.chat(aiPayload({ question: '请综观这套图纸，简要概括图纸内容和各图幅关系' }))
     if (data.session_id) projSessionId.value = data.session_id
-    messages.value.push({ role: 'assistant', content: data.answer, referenced: data.referenced })
-  } catch { /* 静默 */ } finally {
-    chatLoading.value = false
+    const ans = { role: 'assistant', content: data.answer, referenced: data.referenced }
+    const i = messages.value.indexOf(placeholder)  // 占位回填；会话被切换则追加不覆盖
+    if (i >= 0) messages.value[i] = ans
+    else messages.value.push(ans)
+  } catch {
+    // 静默：移除占位气泡（原实现失败不提示）
+    const i = messages.value.indexOf(placeholder)
+    if (i >= 0) messages.value.splice(i, 1)
+  } finally {
+    summarizing.value = false
   }
 }
 
@@ -594,7 +747,7 @@ async function sendQuestion() {
     if (data.session_id) projSessionId.value = data.session_id
     messages.value.push({ role: 'assistant', content: data.answer, referenced: data.referenced })
   } catch (e) {
-    messages.value.push({ role: 'assistant', content: '回答失败: ' + (e.response?.data?.detail || e.message) })
+    messages.value.push({ role: 'assistant', content: '回答失败: ' + chatErrMsg(e) })
   } finally {
     chatLoading.value = false
     snipBlobUrl.value = ''  // 截图随本次问题消费，不残留
@@ -602,7 +755,7 @@ async function sendQuestion() {
 }
 
 async function extractMaterials() {
-  if (!activeSheetId.value) { showToast('请先上传图纸'); return }
+  if (!activeSheetId.value) { showToast('请先选择图纸'); return }
   materialsLoading.value = true
   try {
     const { data } = await drawingApi.materials(aiPayload({}))
@@ -615,7 +768,7 @@ async function extractMaterials() {
 }
 
 async function generateBriefing() {
-  if (!activeSheetId.value) { showToast('请先上传图纸'); return }
+  if (!activeSheetId.value) { showToast('请先选择图纸'); return }
   briefingLoading.value = true
   briefingContent.value = ''
   try {
@@ -681,8 +834,15 @@ const snipRectStyle = computed(() => snipRect.value
       width: snipRect.value.w + 'px', height: snipRect.value.h + 'px' }
   : {})
 
+// 输入栏「截图」→ 唤出预览并直接进入框选（预览是截图的载体）
+function startSnipPreview() {
+  if (!displaySrc.value) { showToast('请先选择图纸'); openPicker('project'); return }
+  showPreview.value = true
+  enterSnipMode()
+}
+
 function enterSnipMode() {
-  if (!displaySrc.value) { showToast('请先上传图纸'); return }
+  if (!displaySrc.value) { showToast('请先选择图纸'); openPicker('project'); return }
   snipMode.value = true
   showToast('在图纸上拖动框选要提问的区域')
 }
@@ -718,7 +878,7 @@ async function doSnipCrop() {
     canvas.height = Math.round(sh)
     canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
     snipBlobUrl.value = canvas.toDataURL('image/png')
-    showSuccessToast('已框选，输入问题后发送即可')
+    showSuccessToast('已框选，点「去提问」返回问答')
   } catch { /* 裁剪失败静默 */ }
 }
 
@@ -817,87 +977,160 @@ function onTouchEnd(e) {
 }
 
 onMounted(() => {
-  // 移动端无需额外初始化
+  // 先选图再问答：进入页面无当前图纸 → 自动唤出选图
+  if (!activeSheetId.value) openPicker('project')
 })
 </script>
 
 <style scoped>
-.drawing-page { display: flex; flex-direction: column; height: 100vh; }
+.drawing-page { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+
+/* ===== 面包屑顶栏 ===== */
 .top-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 6px 10px;
   background: #fff;
   border-bottom: 1px solid #ebedf0;
   flex-shrink: 0;
   min-height: 44px;
-  gap: 8px;
+  z-index: 2;
 }
-.logo-btn {
-  background: none;
+.logo-btn { background: none; border: none; padding: 2px; cursor: pointer; flex-shrink: 0; }
+.logo-img { width: 28px; height: 28px; border-radius: 6px; }
+.crumb {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #f2f3f5;
   border: none;
-  padding: 4px;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.logo-img {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-}
-.top-title { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.account-info {
-  padding: 12px 0;
-}
-.account-info p {
-  margin: 8px 0;
+  border-radius: 14px;
+  padding: 6px 12px;
   font-size: 14px;
-  color: #333;
+  cursor: pointer;
 }
-.preview-area {
+.crumb-text { font-weight: 600; color: #323233; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crumb-empty { color: #969799; }
+.icon-btn {
+  flex-shrink: 0;
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  background: #f2f3f5;
+  border: none;
+  border-radius: 50%;
+  color: #646566;
+  cursor: pointer;
+}
+.account-info { padding: 12px 0; }
+.account-info p { margin: 8px 0; font-size: 14px; color: #333; }
+
+/* ===== 主区：问答（常态占满顶栏以下全部空间） ===== */
+.chat-area {
   flex: 1;
   min-height: 0;
-  position: relative;
+  display: flex;
+  flex-direction: column;
   background: #fff;
-  overflow: hidden;
-  touch-action: none;
 }
-.preview-img {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  user-select: none;
-  will-change: transform;
+.chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px;
+  font-size: 14px;
+  line-height: 1.55;
 }
-.preview-empty {
+.chat-empty {
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   color: #969799;
+  font-size: 14px;
 }
-.zoom-hint {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  font-size: 11px;
-  color: #969799;
-  background: rgba(255,255,255,0.85);
-  padding: 2px 8px;
+.chat-empty p { margin: 0; }
+.msg { margin-bottom: 10px; display: flex; flex-direction: column; }
+.msg.user { align-items: flex-end; }
+.msg.assistant { align-items: flex-start; }
+.msg-bubble {
+  max-width: 92%;
+  padding: 8px 12px;
   border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.snip-rect {
-  position: absolute;
-  border: 1.5px dashed #1989fa;
-  background: rgba(25,137,250,0.12);
-  pointer-events: none;
-  z-index: 9;
+.msg.user .msg-bubble { background: #1989fa; color: #fff; }
+.msg.assistant .msg-bubble { background: #f2f3f5; color: #323233; }
+
+/* 回答 Markdown：显式字号阶梯，杜绝继承默认 16px 膨胀 */
+.msg-bubble.md { white-space: normal; }
+.msg-bubble.md :deep(h1), .msg-bubble.md :deep(h2), .msg-bubble.md :deep(h3),
+.msg-bubble.md :deep(h4), .msg-bubble.md :deep(h5), .msg-bubble.md :deep(h6) {
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: 600;
+  margin: 10px 0 6px;
 }
+.msg-bubble.md :deep(h1) { font-size: 16px; }
+.msg-bubble.md :deep(h1:first-child), .msg-bubble.md :deep(h2:first-child),
+.msg-bubble.md :deep(h3:first-child), .msg-bubble.md :deep(p:first-child) { margin-top: 0; }
+.msg-bubble.md :deep(p) { font-size: 14px; line-height: 1.55; margin: 0 0 8px; }
+.msg-bubble.md :deep(p:last-child) { margin-bottom: 0; }
+.msg-bubble.md :deep(ul), .msg-bubble.md :deep(ol) {
+  font-size: 14px; line-height: 1.55; margin: 0 0 8px; padding-left: 20px;
+}
+.msg-bubble.md :deep(li) { margin: 3px 0; }
+.msg-bubble.md :deep(strong) { font-weight: 600; }
+.msg-bubble.md :deep(a) { color: #1989fa; }
+.msg-bubble.md :deep(code) {
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 4px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+.msg-bubble.md :deep(pre) {
+  overflow-x: auto;
+  background: #fff;
+  padding: 8px;
+  border-radius: 8px;
+  margin: 0 0 8px;
+  max-width: 100%;
+}
+.msg-bubble.md :deep(pre code) { background: none; padding: 0; font-size: 12px; }
+.msg-bubble.md :deep(table) {
+  border-collapse: collapse;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0 0 8px;
+}
+.msg-bubble.md :deep(th), .msg-bubble.md :deep(td) {
+  border: 1px solid #ebedf0;
+  padding: 4px 8px;
+  text-align: left;
+}
+.msg-bubble.md :deep(img) { max-width: 100%; }
+/* 引用段落：默认 40px 大缩进在手机上太占宽，收紧为左侧色条 */
+.msg-bubble.md :deep(blockquote) {
+  margin: 0 0 8px;
+  padding: 4px 8px;
+  border-left: 3px solid rgba(25, 137, 250, 0.4);
+  background: rgba(25, 137, 250, 0.06);
+  border-radius: 0 6px 6px 0;
+  color: #646566;
+}
+.msg-ref { font-size: 12px; color: #969799; margin-top: 4px; max-width: 92%; }
+
 .snip-chip {
   display: flex;
   align-items: center;
@@ -911,115 +1144,127 @@ onMounted(() => {
 }
 .snip-chip img { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; }
 .snip-chip span { flex: 1; }
-.msg-snip {
-  max-width: 60%;
-  border-radius: 8px;
-  margin-bottom: 4px;
-}
-.page-indicator {
-  position: absolute;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+.msg-snip { max-width: 60%; border-radius: 8px; margin-bottom: 4px; }
+
+.chat-input {
   display: flex;
   align-items: center;
-  gap: 12px;
-  background: rgba(0,0,0,0.55);
-  border-radius: 20px;
-  padding: 4px 12px;
-  z-index: 10;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid #ebedf0;
+  background: #fff;
+  flex-shrink: 0;
 }
-.page-btn {
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.2);
-  color: #fff;
-  font-size: 18px;
+.chat-input :deep(.van-field) {
+  background: #f2f3f5;
+  border-radius: 18px;
+  padding: 4px 12px;
+  flex: 1;
+  min-width: 0;             /* 输入框可收缩，避免挤掉右侧发送按钮 */
+}
+.chat-input :deep(.van-field__body) { font-size: 14px; }
+.chat-input :deep(.van-button) {
+  flex-shrink: 0;
+  white-space: nowrap;      /* 「截图」「发送」不许竖排换行 */
+}
+
+/* ===== 预览态（遮罩覆盖问答区） ===== */
+.preview-wrap {
   display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #f7f8fa;
+}
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #fff;
+  border-bottom: 1px solid #ebedf0;
+  flex-shrink: 0;
+  min-height: 44px;
+}
+.ph-close {
+  border: none; background: #f2f3f5; border-radius: 14px;
+  padding: 6px 12px; font-size: 14px; color: #323233; cursor: pointer;
+}
+.ph-title {
+  flex: 1; min-width: 0;
+  font-size: 14px; font-weight: 600; color: #323233;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ph-zoom { font-size: 12px; color: #969799; }
+.ph-pages { display: flex; align-items: center; gap: 8px; }
+
+.preview-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #fff;
+  overflow: hidden;
+  touch-action: none;
+}
+.preview-img {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  user-select: none;
+  will-change: transform;
+}
+.preview-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  color: #969799;
+  font-size: 14px;
+}
+.snip-rect {
+  position: absolute;
+  border: 1.5px dashed #1989fa;
+  background: rgba(25, 137, 250, 0.12);
+  pointer-events: none;
+  z-index: 9;
+}
+.preview-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  border-top: 1px solid #ebedf0;
+  flex-shrink: 0;
+}
+.foot-snip { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; }
+.foot-tip { font-size: 12px; color: #969799; }
+
+.page-btn {
+  width: 30px; height: 30px;
+  border: none; border-radius: 50%;
+  background: #f2f3f5;
+  color: #323233;
+  font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
   cursor: pointer;
 }
-.page-btn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-.page-btn:active:not(:disabled) {
-  background: rgba(255,255,255,0.4);
-}
-.page-text {
-  color: #fff;
-  font-size: 13px;
-  min-width: 40px;
-  text-align: center;
-}
-.bottom-panel { flex-shrink: 0; background: #fff; border-top: 1px solid #ebedf0; max-height: 45vh; display: flex; flex-direction: column; }
-.bottom-panel.upload-open { max-height: 62vh; }
-.bottom-panel.upload-open .chat-panel { height: 57vh; }
-.chat-panel { display: flex; flex-direction: column; height: 40vh; }
-.chat-messages { flex: 1; overflow-y: auto; padding: 12px; }
-.chat-empty { text-align: center; color: #969799; padding: 24px 0; font-size: 13px; }
-.msg { margin-bottom: 10px; display: flex; flex-direction: column; }
-.msg.user { align-items: flex-end; }
-.msg.assistant { align-items: flex-start; }
-.msg-bubble {
-  max-width: 80%;
-  padding: 8px 12px;
-  border-radius: 12px;
-  font-size: 14px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.msg.user .msg-bubble { background: #1989fa; color: #fff; }
-.msg.assistant .msg-bubble { background: #f2f3f5; color: #323233; }
-.msg-ref { font-size: 11px; color: #969799; margin-top: 4px; max-width: 80%; }
-.chat-input { display: flex; align-items: center; gap: 8px; padding: 8px; border-top: 1px solid #ebedf0; }
-.chat-input :deep(.van-field) { background: #f2f3f5; border-radius: 18px; padding: 4px 12px; }
-.sub-panel { padding: 12px; overflow-y: auto; }
-.materials-list { margin-top: 12px; }
-.material-item { padding: 10px; border-bottom: 1px solid #f2f3f5; }
-.m-name { font-size: 14px; font-weight: 600; }
-.m-spec { font-size: 12px; color: #969799; margin-top: 2px; }
-.briefing-content {
-  margin-top: 12px;
-  font-size: 13px;
-  line-height: 1.8;
-  white-space: pre-wrap;
-  background: #f7f8fa;
-  padding: 12px;
-  border-radius: 8px;
-  max-height: 30vh;
-  overflow-y: auto;
-}
-.uploader-panel { padding: 20px 16px 24px; }
+.page-btn:disabled { opacity: 0.3; cursor: default; }
+.page-text { font-size: 13px; color: #646566; min-width: 44px; text-align: center; }
+
+/* ===== 选图弹窗 ===== */
+.uploader-panel { padding: 16px 16px 24px; }
 .uploader-panel h4 { margin: 0 0 12px; font-size: 16px; }
 .uploader-tip { font-size: 12px; color: #969799; margin-top: 8px; }
-.upload-inline {
-  border-top: 1px solid #ebedf0;
-  background: #fafafa;
-  padding: 8px 12px 10px;
-  flex-shrink: 0;
-  max-height: 24vh;
-  overflow-y: auto;
-}
-.upload-inline-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.upload-inline-title { font-size: 14px; font-weight: 600; color: #323233; }
-.upload-inline .file-list { max-height: 9vh; }
+.upload-block { padding-top: 8px; }
 .file-list { margin-top: 12px; max-height: 30vh; overflow-y: auto; }
 .pick-toggle {
   display: flex;
   background: #f2f3f5;
   border-radius: 18px;
   padding: 3px;
-  margin: 8px 0;
+  margin: 4px 0 10px;
 }
 .pick-toggle-btn {
   flex: 1;
@@ -1035,7 +1280,7 @@ onMounted(() => {
   background: #fff;
   color: #1989fa;
   font-weight: 600;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 .dg-head {
   display: flex;
@@ -1052,5 +1297,22 @@ onMounted(() => {
   padding: 8px 0;
   border-bottom: 1px solid #f2f3f5;
   font-size: 13px;
+}
+
+/* ===== 材料表 / 交底 ===== */
+.materials-list { margin-top: 12px; max-height: 50vh; overflow-y: auto; }
+.material-item { padding: 10px; border-bottom: 1px solid #f2f3f5; }
+.m-name { font-size: 14px; font-weight: 600; }
+.m-spec { font-size: 12px; color: #969799; margin-top: 2px; }
+.briefing-content {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  background: #f7f8fa;
+  padding: 12px;
+  border-radius: 8px;
+  max-height: 45vh;
+  overflow-y: auto;
 }
 </style>

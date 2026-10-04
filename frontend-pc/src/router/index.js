@@ -12,6 +12,11 @@ const routes = [
     redirect: '/drawing-review',
   },
   {
+    // 移动端「切换到 PC 版」落在 /pc：需有路由兜底，否则 vue-router 无匹配白屏
+    path: '/pc',
+    redirect: '/drawing-review',
+  },
+  {
     path: '/drawing-review',
     name: 'DrawingReview',
     component: () => import('../views/DrawingReview.vue'),

@@ -81,6 +81,18 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """全局未处理异常 → 记入错误日志文件，返回统一 500 JSON"""
+    # LLM 服务商错误（openai SDK 异常）：透传可读摘要，避免用户只看到 500 通用文案
+    import openai as _openai
+    if isinstance(exc, _openai.APIStatusError):
+        status = exc.status_code if exc.status_code in (400, 401, 403, 404, 429, 500, 502, 503) else 502
+        summary = str(getattr(exc, "message", "") or exc)[:200]
+        logging.getLogger("app").error("LLM服务商拒绝 %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(status_code=status,
+                            content={"detail": f"模型服务拒绝了请求（{status}）：{summary}"})
+    if isinstance(exc, (_openai.APIConnectionError, _openai.APITimeoutError)):
+        logging.getLogger("app").error("LLM连接失败 %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(status_code=502,
+                            content={"detail": "模型服务连接超时，请稍后重试"})
     logging.getLogger("app").exception("未处理异常 %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "服务器内部错误，请稍后重试"})
 
@@ -164,7 +176,9 @@ if frontend_dist.exists():
 
     @app.get("/mobile", include_in_schema=False)
     async def mobile_redirect():
-        return FileResponse(str(mobile_dist / "index.html"), headers=_NO_CACHE_HEADERS)
+        # 旧书签 /mobile → 302 到移动前端正确基路径 /m/（vite base，直接给 index 会 404 assets）
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/m/", status_code=302)
 
     @app.api_route("/{full_path:path}", methods=["GET"], include_in_schema=False)
     async def spa_catch_all(full_path: str):

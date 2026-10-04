@@ -4,6 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>看图兔 - 图纸识别助手</title>
+  <script>
+    // 手机访问根路径 → 自动进移动前端 /m（仅根路径；深链 /drawing-review、/admin/* 不受影响）
+    // sessionStorage['use_pc']=1 表示用户在手机上主动选了「PC 版」，本次会话不再弹回
+    (function () {
+      if (location.pathname !== '/' || sessionStorage.getItem('use_pc')) return
+      if (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+        location.replace('/m/')
+      }
+    })()
+  </script>
 </head>
 <body>
   <div id="app"></div>

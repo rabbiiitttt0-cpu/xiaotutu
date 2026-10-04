@@ -143,7 +143,8 @@ const showLogoMenu = ref(false)
 const showAccountInfo = ref(false)
 
 function switchToMobile() {
-  window.location.href = '/mobile'
+  sessionStorage.removeItem('use_pc')  // 主动切手机端：清掉「留在PC版」标记
+  window.location.href = '/m/'
 }
 
 const menus = computed(() => [

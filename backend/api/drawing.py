@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from services.mask_service import (
     CipherMap, mask_info, mask_text, restore_text,
     load_project_cipher, mask_and_persist,
 )
+from services import fast_route
 
 router = APIRouter()
 
@@ -73,6 +75,88 @@ def _png_paths(file_id: str) -> list[Path]:
             pages.append((int(m.group(1)), p))
     paths.extend(p for _, p in sorted(pages))
     return paths
+
+
+_MAX_IMG_BYTES = 4 * 1024 * 1024   # DeepSeek 单图体积上限（超限报 unsupported image）
+_MAX_IMG_SIDE = 4096                # 单边像素上限
+
+
+def _img_data_url(data: bytes, src: str = "") -> str | None:
+    """校验+规范化图片 → 返回 dataURL；不合法返回 None（调用方跳过该图，不整单失败）。
+    魔数校验（防 .png 实为其它编码）→ Pillow 解码 → RGBA 合成白底 →
+    超限（体积/单边）降采样重编码 JPEG(q85)。修 deepseek "unsupported image" 400。"""
+    from io import BytesIO
+    from PIL import Image
+    log = logging.getLogger("app")
+    head = data[:16]
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif head.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif head.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    elif head.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        log.warning("[问答] 跳过不支持的图片格式 src=%s head=%r", src, head[:8])
+        return None
+    try:
+        im = Image.open(BytesIO(data))
+        im.load()
+        changed = False
+        if im.mode in ("RGBA", "LA", "P", "PA"):   # 透明底合成白底（直接丢 alpha 会出黑块）
+            rgba = im.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[3])
+            im, changed = bg, True
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+            changed = True
+        if max(im.size) > _MAX_IMG_SIDE:
+            im.thumbnail((_MAX_IMG_SIDE, _MAX_IMG_SIDE))
+            changed = True
+        if changed or len(data) > _MAX_IMG_BYTES:
+            buf = BytesIO()
+            im.save(buf, "JPEG", quality=85)
+            out = buf.getvalue()
+            if len(out) > _MAX_IMG_BYTES:           # 重编码后仍超限，继续降
+                im.thumbnail((_MAX_IMG_SIDE // 2, _MAX_IMG_SIDE // 2))
+                buf = BytesIO()
+                im.save(buf, "JPEG", quality=80)
+                out = buf.getvalue()
+            log.info("[问答] 图片规范化 src=%s %s→%s %dB", src, mime, "image/jpeg", len(out))
+            return "data:image/jpeg;base64," + base64.b64encode(out).decode("ascii")
+        return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+    except Exception as e:
+        log.warning("[问答] 图片解码失败已跳过 src=%s err=%s", src, e)
+        return None
+
+
+def _img_data_url_from_path(p: Path) -> str | None:
+    try:
+        return _img_data_url(p.read_bytes(), src=p.name)
+    except Exception as e:
+        logging.getLogger("app").warning("[问答] 读图失败已跳过 %s: %s", p.name, e)
+        return None
+
+
+# 图片规范化线程池：Pillow 编解码/缩放在 C 层释放 GIL，4 并发把多图
+# 串行逐张（0.5-1.5s/张、8 张可达 10s+）压到亚秒级；限 4 防内存尖峰（服务器有 OOM 前科）
+_IMG_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="imgnorm")
+
+
+def _img_data_urls_parallel(paths: list[Path]) -> list[str | None]:
+    """多图规范化并行版：结果与逐张串行调用完全一致（顺序保持），单张仍走原函数"""
+    if len(paths) <= 1:
+        return [_img_data_url_from_path(p) for p in paths]
+    return list(_IMG_POOL.map(_img_data_url_from_path, paths))
+
+
+def _img_data_urls_from_bytes(items: list[tuple[bytes, str]]) -> list[str | None]:
+    """同上，输入为 (bytes, src) 对（prep 生料包图片：解码便宜已串行完成，规范化并行）"""
+    if len(items) <= 1:
+        return [_img_data_url(d, src=s) for d, s in items]
+    return list(_IMG_POOL.map(lambda t: _img_data_url(t[0], src=t[1]), items))
 
 
 def _save_context(file_id: str, info: dict):
@@ -186,9 +270,11 @@ def _image_content(text: str, file_id: str) -> tuple[object, bool]:
     pngs = _png_paths(file_id)[:3]
     if pngs:
         content = [{"type": "text", "text": text}]
-        for p in pngs:
-            b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        for url in _img_data_urls_parallel(pngs):
+            if url:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+        if len(content) == 1:
+            return (text, False)
         return (content, True)
     return (text, False)
 
@@ -201,9 +287,11 @@ def _image_content_ex(text: str, file_id: str, info: dict) -> tuple[object, bool
             return (text, False)
         tiles = sorted(UPLOAD_DIR.glob(f"{file_id}_p1_t*.png"))[:6]
         content = [{"type": "text", "text": text}]
-        for p in [pngs[0]] + tiles:
-            b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        for url in _img_data_urls_parallel([pngs[0]] + tiles):
+            if url:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+        if len(content) == 1:
+            return (text, False)
         return (content, True)
     return _image_content(text, file_id)
 
@@ -350,6 +438,56 @@ async def drawing_image(file_id: str, fmt: str = "",
     if hi.exists():
         return FileResponse(str(hi), media_type="image/png")
     return FileResponse(str(pngs[0]), media_type="image/png")
+
+
+def _project_dxf_source(file_id: str):
+    """项目图纸 DXF 懒重建：预处理时 .dxf 中间件已删（project_service 步骤6），
+    首次请求时原始 .dxf 直接回源；.dwg 现场转出并缓存到 UPLOAD_DIR（原子替换，
+    并发首访各转各的、后者覆盖无害）。仅在 _require_file 鉴权通过后调用。"""
+    from db.database import SessionLocal
+    from db.models.project import ProjectDrawing
+    db = SessionLocal()
+    try:
+        rec = db.query(ProjectDrawing).filter_by(cache_file_id=file_id).first()
+        if rec is None:
+            return None
+        orig = Path(rec.original_path or "")
+        if not orig.is_file():
+            return None
+        suf = orig.suffix.lower()
+        if suf == ".dxf":
+            return orig
+        if suf == ".dwg":
+            from services.drawing_service import convert_dwg_to_dxf
+            dxf = UPLOAD_DIR / f"{file_id}.dxf"
+            tmp = UPLOAD_DIR / f"{file_id}.{uuid.uuid4().hex[:6]}.dxf.tmp"
+            ok, msg = convert_dwg_to_dxf(str(orig), str(tmp))
+            if not ok:
+                logging.getLogger("app").error(
+                    "项目图纸懒转 DXF 失败: fid=%s file=%s msg=%s", file_id, rec.filename, msg)
+                tmp.unlink(missing_ok=True)
+                return None
+            tmp.replace(dxf)
+            return dxf
+        return None  # PDF 等无 DXF
+    finally:
+        db.close()
+
+
+@router.get("/{file_id}/dxf")
+def drawing_dxf(file_id: str, user: User = Depends(get_current_user)):
+    """原始 DXF 下发（前端 dxf-viewer WebGL 矢量预览用；路由 include 级已带登录认证）。
+    本地上传：DWG 同步转出的 .dxf 留在 UPLOAD_DIR。项目图纸：中间件已删，首访懒重建
+    （见 _project_dxf_source）。PDF 无 DXF → 404，前端静默不显示矢量按钮。
+    def 非 async：dwg2dxf 懒转秒级，走 FastAPI 线程池不堵事件循环。"""
+    _require_file(file_id, _load_context(file_id), user)
+    dxf = UPLOAD_DIR / f"{file_id}.dxf"
+    if not dxf.exists():
+        src = _project_dxf_source(file_id)
+        if src is None:
+            raise HTTPException(status_code=404, detail="该图纸无 DXF 源文件")
+        return FileResponse(str(src), media_type="application/dxf")
+    return FileResponse(str(dxf), media_type="application/dxf")
 
 
 @router.get("/{file_id}/image/{n}")
@@ -708,15 +846,17 @@ def _set_image_content(text: str, sheets: list[dict], max_images: int = 8) -> tu
     attached = 0
     idx = 0
     while attached < max_images:
-        progressed = False
+        # 按页码分批：本轮所有图幅的第 idx 页一起并行规范化（选图顺序=轮转序，与原串行一致）
+        batch = []
         for ps, _fn in queues:
-            if idx < len(ps) and attached < max_images:
-                b64 = base64.b64encode(ps[idx].read_bytes()).decode("ascii")
-                content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
-                attached += 1
-                progressed = True
-        if not progressed:
+            if idx < len(ps) and len(batch) < max_images - attached:
+                batch.append(ps[idx])
+        if not batch:
             break
+        for url in _img_data_urls_parallel(batch):
+            if attached < max_images and url:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+                attached += 1
         idx += 1
     if any(len(ps) > 1 for ps, _ in queues):
         content[0]["text"] += ("\n\n附：图像按图幅分组附送，每幅依次为【整图/首页】→【后续分页或图框切片】"
@@ -968,11 +1108,112 @@ def _payload_content(question: str, prep: dict) -> tuple[object, bool]:
     """生料包 → 多模态 user content（附图说明编号与图像一一对应）"""
     if not prep.get("images"):
         return (question, False)
+    items: list[tuple[bytes, str]] = []
+    for i, img in enumerate(prep["images"]):
+        try:
+            items.append((base64.b64decode(img["b64"]), f"prep[{i}]"))
+        except Exception:
+            continue
     content = [{"type": "text", "text": question + (prep.get("notes") or "")}]
-    for img in prep["images"]:
-        content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img['b64']}"}})
+    for url in _img_data_urls_from_bytes(items):
+        if url:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+    if len(content) == 1:
+        return (question, False)
     return (content, True)
+
+
+def _question_hits_block(info: dict, question: str, limit: int = 40) -> str:
+    """与问题相关的标注检索命中（带重复计数，与 _sheet_text_context 内命中段同格式）。
+    供问题相关文本单独注入 user 消息用（prompt 前缀缓存要求 system 逐字稳定）。"""
+    if not question:
+        return ""
+    hits = _search_annotations(info, question, limit=limit)
+    if not hits:
+        return ""
+    counts: dict[str, int] = {}
+    for t in info.get("text_annotations") or []:
+        txt = (t.get("text") or "").strip()
+        if txt:
+            counts[txt] = counts.get(txt, 0) + 1
+    lines = []
+    for h in hits:
+        n = counts.get(h, 1)
+        lines.append(f"- {h}（×{n}）" if n > 1 else f"- {h}")
+    total = len(info.get("text_annotations") or [])
+    return f"【与问题相关的标注】（全量 {total} 条标注中检索命中 {len(hits)} 条）\n" + "\n".join(lines)
+
+
+async def _try_fast_route(sheets: list[dict], srec: dict, question: str,
+                          history: list, llm_service, pidx: int):
+    """一期优化#1：图纸集快路尝试。
+    证据门（本地零成本）→ 规则/LLM 分类 → 文本直答（#2 数值防失真）。
+    返回 (答案, 用作证据的图幅列表)；任何一步不确定/证据不足/模型自判 NEED_IMAGE → None（慢路）"""
+    # —— 证据门：总览、检索命中、标题栏全无 → 文本数据太薄，不尝试 ——
+    set_summary = (srec.get("set_summary") or "").strip()
+    stable_ctx = _set_text_context(sheets)
+    hit_blocks: list[str] = []
+    hit_sheets: list[dict] = []
+    has_title = False
+    for s in sheets:
+        try:
+            info = _load_context(s["file_id"])
+        except Exception:
+            continue
+        if not has_title and (info.get("title_block") or "").strip():
+            has_title = True
+        h = _question_hits_block(info, question)
+        if h:
+            hit_sheets.append(s)
+            hit_blocks.append(f"=== 图幅：{s['filename']} ===\n{h}")
+    if not set_summary and not hit_blocks and not has_title:
+        return None
+
+    # —— 分类：规则前置（零延迟），拿不准交轻量 LLM；慢路词/LLM 判慢 → 放弃快路 ——
+    verdict = fast_route.rules_classify(question)
+    if verdict == "slow":
+        return None
+    if not verdict and not await fast_route.llm_classify(question, llm_service, pidx):
+        return None
+
+    # —— 快路直答 ——
+    ctx_parts: list[str] = []
+    if set_summary:
+        ctx_parts.append(f"【图纸集总览（含各图幅关系）】\n{set_summary}")
+    ctx_parts.append(stable_ctx)
+    ctx_parts.extend(hit_blocks)
+    answer = await fast_route.fast_answer(
+        question, "\n\n".join(p for p in ctx_parts if p and p.strip()),
+        _history_msgs(history), llm_service, pidx)
+    if not answer:
+        return None
+    return answer, (hit_sheets or sheets)
+
+
+async def _try_fast_route_single(info: dict, question: str, history: list,
+                                 llm_service, pidx: int) -> str | None:
+    """一期优化#1：单图快路尝试。返回答案文本；证据不足/判慢/NEED_IMAGE → None（慢路）"""
+    title = (info.get("title_block") or "").strip()
+    desc = (info.get("description") or "").strip()
+    hits_txt = _question_hits_block(info, question)
+    if not title and not hits_txt and len(desc) < 200:
+        return None  # 证据门：文本数据太薄
+
+    verdict = fast_route.rules_classify(question)
+    if verdict == "slow":
+        return None
+    if not verdict and not await fast_route.llm_classify(question, llm_service, pidx):
+        return None
+
+    ctx_parts: list[str] = []
+    if desc:
+        ctx_parts.append(f"【图纸结构化信息】\n{desc[:6000]}")
+    if title:
+        ctx_parts.append(f"【图框标题栏】\n{title[:400]}")
+    if hits_txt:
+        ctx_parts.append(hits_txt)
+    return await fast_route.fast_answer(
+        question, "\n\n".join(ctx_parts), _history_msgs(history), llm_service, pidx)
 
 
 async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
@@ -991,6 +1232,18 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
     pidx = config.drawing_provider_index
     locate_idx = resolve_provider_index(config, config.locate_provider_index)
     proj_id = srec.get("project_id") or 0
+
+    # ===== 一期优化#1：问题分类双路线——文本可摘取 → 快路直答（跳过定位+图像预处理）=====
+    # 框选截图必走视觉；snip_locate 开关同时作为快路的总开关（异常时可一键回退）
+    if use_agents and not snip_image and config.agent_settings.snip_locate_enabled:
+        fast_out = await _try_fast_route(sheets, srec, question, history or [],
+                                         llm_service, pidx)
+        if fast_out is not None:
+            answer_fast, used = fast_out
+            _record_usage(endpoint, False, getattr(llm_service, "last_usage", None))
+            referenced = [{"file_id": s["file_id"], "filename": s["filename"]}
+                          for s in used]
+            return answer_fast, False, referenced, "文本直答（快路）"
 
     prep = None
     if use_agents and config.agent_settings.snip_locate_enabled:
@@ -1021,10 +1274,28 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
         except Exception:
             pass  # 深页检索失败不阻断主问答
 
-    ctx = _set_text_context(selected, question)
+    # 问题相关文本 → 全部挪进 user 消息（原先在 system 里会打断前缀缓存）：
+    # ① PDF 深页检索摘录 ② 与问题相关的标注检索命中 ③ 生料包文字摘要 ④ 框选提示
+    # 注意：深页摘录须先于 ctx 构建摘出，否则会同时注入 system 与 user（重复）
+    q_bits: list[str] = []
+    for s in selected:
+        extra = s.pop("_routed_pages_text", "") or ""
+        if extra:
+            q_bits.append(f"=== 图幅：{s['filename']} ==={extra}")
+    # 稳定文本上下文（图签/标注/图层，不含问题检索命中）→ 进 system；
+    # 同一图纸集只要路由选图一致，system 跨问题逐字相同 → prompt 前缀缓存可覆盖到历史+图像
+    ctx = _set_text_context(selected)
+    for s in selected:
+        try:
+            info = _load_context(s["file_id"])
+        except Exception:
+            continue
+        hits_txt = _question_hits_block(info, question)
+        if hits_txt:
+            q_bits.append(f"=== 图幅：{s['filename']} ===\n{hits_txt}")
     # 按图幅分组的文字摘要（对比型定位的文本武器）
     if prep and prep.get("texts"):
-        ctx += "\n\n" + "\n".join(prep["texts"])
+        q_bits.append("\n".join(prep["texts"]))
     # 图纸集总览注入 QA（orchestrated 路径下关系描述已进 LocateAgent 窗口，QA 不再背）
     set_summary = (srec.get("set_summary") or "").strip()
     if set_summary and not prep:
@@ -1032,13 +1303,16 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
     names = "、".join(s["filename"] for s in selected)
     has_any_image = any(_png_paths(s["file_id"]) for s in selected)
     if snip_image:
-        ctx += ("\n\n【用户框选】第1张图是用户在图纸上框选的局部区域截图，问题针对该区域"
-                "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
+        q_bits.append("【用户框选】第1张图是用户在图纸上框选的局部区域截图，问题针对该区域"
+                      "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
     system_prompt = prompt_builder(len(sheets), names, ctx, has_any_image)
+    user_text = question
+    if q_bits:
+        user_text = "【本问题相关的图纸文本】\n\n" + "\n\n".join(q_bits) + "\n\n" + question
 
     if prep and prep.get("images"):
         # 定位Agent生料包：整幅切片+部位裁剪（替代轮转图包）
-        user_content, with_image = _payload_content(question, prep)
+        user_content, with_image = _payload_content(user_text, prep)
         if snip_image:
             user_content = _prepend_snip(user_content, snip_image)
             with_image = True
@@ -1048,7 +1322,7 @@ async def _set_llm_call(req_set_id: str, question: str, endpoint: str,
             history_msgs=_history_msgs(history or []), user_content=user_content,
             temperature=temperature, max_tokens=max_tokens)
     else:
-        user_content, with_image = _set_image_content(question, selected)
+        user_content, with_image = _set_image_content(user_text, selected)
         if snip_image:
             user_content = _prepend_snip(user_content, snip_image)
             with_image = True
@@ -1194,15 +1468,22 @@ def _history_msgs(history: list) -> list:
 
 
 def _prepend_snip(content: object, snip_data_url: str) -> object:
-    """把框选截图插到多模态 content 最前（第1张图=用户框选区域）"""
+    """把框选截图插到多模态 content 最前（第1张图=用户框选区域）；截图同样过规范化校验"""
     if not snip_data_url.startswith("data:image/"):
+        return content
+    try:
+        raw = base64.b64decode(snip_data_url.split(",", 1)[1])
+    except Exception:
+        return content
+    url = _img_data_url(raw, src="snip")
+    if not url:
         return content
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
     elif isinstance(content, list):
         content = list(content)
     content.insert(1 if content and content[0].get("type") == "text" else 0,
-                   {"type": "image_url", "image_url": {"url": snip_data_url}})
+                   {"type": "image_url", "image_url": {"url": url}})
     return content
 
 
@@ -1240,6 +1521,7 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
   图号、版本、比例等，是识别图幅身份与内容的最可靠依据，回答图幅归属类问题时优先采用
 
 ## 回答要求
+- 先给结论再给说明：开头一两句话直接回答问题（结论/答案），然后再展开依据和细节
 - 基于图纸实际数据回答，不编造不存在的信息
 - 回答涉及具体数值/构造时，注明依据的是哪张图
 - 如果所选图幅不足以回答问题，说明还需要哪张图{vision_note}
@@ -1296,6 +1578,7 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
 4. 解答用户关于图纸内容的任何问题
 
 ## 回答要求
+- 先给结论再给说明：开头一两句话直接回答问题（结论/答案），然后再展开依据和细节
 - 基于图纸实际数据回答，不编造不存在的信息
 - 文件名通常就是图名；图中图框（一般在右下角）含项目名称、图纸专业、图名、
   图号、版本、比例等，是识别图幅身份与内容的最可靠依据，应优先采用
@@ -1303,51 +1586,66 @@ async def drawing_chat(req: ChatRequest, user: User = Depends(get_current_user))
 - 使用专业但易懂的工程术语
 - 中文回答"""
 
-    # 第3招：按问题从全量标注中检索补充（去重注入之外的遗漏标注在此兜底）
+    # 问题相关文本（检索命中/框选提示/生料包摘要）→ 全部进 user 消息，
+    # system 保持逐字稳定 → 同图纸跨问题 prompt 前缀缓存可覆盖历史+图像（一期#4）
+    q_bits: list[str] = []
     hits = _search_annotations(info, question_masked)
     if hits:
         total = len(info.get("text_annotations", []))
-        system_prompt += (f"\n\n## 与问题相关的标注（从全量 {total} 条标注中检索命中 {len(hits)} 条）\n"
-                          + "\n".join(f"- {h}" for h in hits))
+        q_bits.append(f"## 与问题相关的标注（从全量 {total} 条标注中检索命中 {len(hits)} 条）\n"
+                      + "\n".join(f"- {h}" for h in hits))
     if req.snip_image:
-        system_prompt += ("\n\n【用户框选】第1张图是用户在图纸上框选的局部区域截图，问题针对该区域"
-                          "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
+        q_bits.append("【用户框选】第1张图是用户在图纸上框选的局部区域截图，问题针对该区域"
+                      "（如'这样的X还有多少'）——请先在整图中识别同类对象，再对照回答。")
 
-    user_content, with_image = _image_content_ex(question_masked, req.file_id, info)
+    # ===== 一期优化#1：单图快路直答（文本可摘取 → 跳过定位+图像预处理）=====
+    fast_result = None
+    if not req.snip_image and config.agent_settings.snip_locate_enabled:
+        fast_result = await _try_fast_route_single(info, question_masked, history,
+                                                   llm_service,
+                                                   config.drawing_provider_index)
 
-    # 多Agent编排：LocateAgent 定位 + Snip 生料包（整幅切片+部位裁剪替代默认图包）。
-    # 失败/无图 → 上面构造的默认 content 原样使用（静默回退）
-    prep = None
-    if config.agent_settings.snip_locate_enabled:
-        try:
-            sheet = {"file_id": req.file_id, "filename": info.get("filename", ""),
-                     "summary": ""}
-            prep = await _orchestrated_prep(question_masked, history, [sheet],
-                                            llm_service,
-                                            resolve_provider_index(config, config.locate_provider_index),
-                                            req.project_id or 0)
-        except Exception:
-            logging.getLogger("app").exception("[orchestrator] 单图定位失败，回退默认图包")
-            prep = None
-    if prep and prep.get("images"):
-        if prep.get("texts"):
-            system_prompt += "\n\n## 相关图幅文字摘要\n" + "\n\n".join(prep["texts"])
-        user_content, with_image = _payload_content(question_masked, prep)
+    if fast_result is not None:
+        result, with_image = fast_result, False
+    else:
+        # 多Agent编排：LocateAgent 定位 + Snip 生料包（整幅切片+部位裁剪替代默认图包）。
+        # 失败/无图 → 下面构造的默认 content 原样使用（静默回退）
+        prep = None
+        if config.agent_settings.snip_locate_enabled:
+            try:
+                sheet = {"file_id": req.file_id, "filename": info.get("filename", ""),
+                         "summary": ""}
+                prep = await _orchestrated_prep(question_masked, history, [sheet],
+                                                llm_service,
+                                                resolve_provider_index(config, config.locate_provider_index),
+                                                req.project_id or 0)
+            except Exception:
+                logging.getLogger("app").exception("[orchestrator] 单图定位失败，回退默认图包")
+                prep = None
+        if prep and prep.get("images") and prep.get("texts"):
+            q_bits.append("## 相关图幅文字摘要\n" + "\n\n".join(prep["texts"]))
+        user_text = question_masked
+        if q_bits:
+            user_text = "【本问题相关的图纸文本】\n\n" + "\n\n".join(q_bits) + "\n\n" + question_masked
+        if prep and prep.get("images"):
+            user_content, with_image = _payload_content(user_text, prep)
+        else:
+            user_content, with_image = _image_content_ex(user_text, req.file_id, info)
 
-    if req.snip_image:
-        user_content = _prepend_snip(user_content, req.snip_image)
-        with_image = True
-    result = await llm_service.chat_complete(
-        messages=[
-            {"role": "system", "content": system_prompt},
-        ] + _history_msgs(history) + [
-            {"role": "user", "content": user_content},
-        ],
-        provider_index=config.drawing_provider_index,
-        temperature=0.5,
-        max_tokens=8192,
-        module="drawing",
-    )
+        if req.snip_image:
+            user_content = _prepend_snip(user_content, req.snip_image)
+            with_image = True
+        result = await llm_service.chat_complete(
+            messages=[
+                {"role": "system", "content": system_prompt},
+            ] + _history_msgs(history) + [
+                {"role": "user", "content": user_content},
+            ],
+            provider_index=config.drawing_provider_index,
+            temperature=0.5,
+            max_tokens=8192,
+            module="drawing",
+        )
     _record_usage("chat", with_image, getattr(llm_service, "last_usage", None))
 
     # 还原 + 项目会话落库

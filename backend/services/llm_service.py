@@ -113,13 +113,31 @@ class OpenAIProvider(LLMProvider):
                 extra["extra_body"] = {"thinking": {"type": "enabled"}}
             elif p == "openai":
                 extra["reasoning_effort"] = effort
-        resp = await client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **extra,
-        )
+        async def _create(budget: int):
+            return await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=budget,
+                **extra,
+            )
+
+        resp = await _create(max_tokens)
+        # 推理模型（deepseek-flash 等）的 reasoning 计入 max_tokens：预算被思考
+        # 烧光时 content 为空、finish_reason=length——绝不能把思考原文当回答
+        # 返回（生产事故：2026-10-03 会话310 吐出 4.5 万字符截断思考链）。
+        # 加倍预算重试（最多 2 次、封顶 32768），拿到正式回答为止。
+        attempts = 0
+        while (not resp.choices[0].message.content
+               and getattr(resp.choices[0], "finish_reason", "") == "length"
+               and attempts < 2 and max_tokens < 32768):
+            budget = min(max_tokens * 2, 32768)
+            try:
+                resp = await _create(budget)
+            except Exception:
+                break  # 加倍预算被厂商拒绝等 → 按已有响应走下方兜底，不放大故障
+            max_tokens = budget
+            attempts += 1
         content = resp.choices[0].message.content
         # 透传 token 用量（识图模块用量统计用；各请求独立实例，无并发共享问题）
         try:
@@ -131,10 +149,13 @@ class OpenAIProvider(LLMProvider):
             from api.system_status import track_llm_latency
             track_llm_latency(_time.time() - _t0)
         except Exception: pass
-        # MiMo v2.5 等模型的思考过程在 reasoning_content，实际回答在 content
-        # 如果 content 为空，尝试从 reasoning_content 提取
         if not content and hasattr(resp.choices[0].message, 'reasoning_content'):
-            content = resp.choices[0].message.reasoning_content or ''
+            reasoning = resp.choices[0].message.reasoning_content or ''
+            if getattr(resp.choices[0], "finish_reason", "") == "length":
+                # 重试用尽仍是 length：思考被截断，返回提示而非思考原文
+                return "（模型思考超时，本次未能生成正式回答，请稍后重试或简化问题）"
+            # 个别模型（如 MiMo v2.5）content 为空时答案在 reasoning_content
+            content = reasoning
         return content
 
 
