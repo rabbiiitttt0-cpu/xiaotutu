@@ -147,7 +147,9 @@ export const drawing = {
   getSession: (id) => api.get(`/drawing/sessions/${id}`),
   deleteSession: (id) => api.delete(`/drawing/sessions/${id}`),
   image: (fileId) => api.get(`/drawing/${fileId}/image`, { responseType: 'blob' }),
-  dxfFile: (fileId) => api.get(`/drawing/${fileId}/dxf`, { responseType: 'blob' }),
+  // 600s：DXF 源文件整包下发（生产实测最大 72MB、公网 3Mbps 下 258s）；
+  // 默认 30s 必超时 → 探测失败 → 「DXF 矢量」按钮永不出现（1004 生产实锤）
+  dxfFile: (fileId) => api.get(`/drawing/${fileId}/dxf`, { responseType: 'blob', timeout: 600000 }),
   imageN: (fileId, n) => api.get(`/drawing/${fileId}/image/${n}`, { responseType: 'blob' }),
   pages: (fileId) => api.get(`/drawing/${fileId}/pages`),
   usage: () => api.get('/drawing/usage'),
