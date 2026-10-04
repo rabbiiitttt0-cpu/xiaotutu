@@ -279,6 +279,15 @@
             <span>左键拖动 · 滚轮缩放 · 触控双指</span>
           </div>
           <div v-if="dxfLoading" class="dxf-loading">DXF 矢量解析中…（大图约数秒）</div>
+          <!-- 陌生字体提醒：图纸引用的字体本机没有，已用通用字形近似显示 -->
+          <div v-if="dxfFontWarn && !dxfFontWarnClosed" class="dxf-font-warn">
+            <span>
+              图纸字体未安装：{{ dxfFontWarn.fonts.slice(0, 5).join('、') }}<template
+                v-if="dxfFontWarn.fonts.length > 5"> 等 {{ dxfFontWarn.fonts.length }} 种</template>，
+              已用通用字形近似显示<template v-if="dxfFontWarn.missing">；部分生僻字符显示为 ?</template>
+            </span>
+            <button class="dxf-font-warn-close" @click.stop="dxfFontWarnClosed = true">✕</button>
+          </div>
         </div>
         <!-- 自绘缩放拖动容器：滚轮缩放、按住拖动、双击复位 -->
         <div
@@ -543,6 +552,7 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { drawing as drawingApi, projects as projectsApi, chatErrMsg } from '../api'
 import { WavRecorder } from '../utils/wavRecorder'
+import { analyzeDxfFile } from '../utils/dxfEncoding'
 import TutorialOverlay from '../components/TutorialOverlay.vue'
 
 const tutorialRef = ref(null)
@@ -776,12 +786,39 @@ const displaySrc = computed(() => previewUrls.value[pageIdx.value])
 const dxfUrl = ref('')
 const dxfHostRef = ref(null)
 const dxfLoading = ref(false)
+const dxfEncoding = ref('utf-8')    // analyzeDxfFile 判定结果（gbk 图喂给 fileEncoding）
+const dxfScanFonts = ref([])        // analyzeDxfFile 扫出的 STYLE 段字体名（文件直扫，不走 parser）
+const dxfFontWarn = ref(null)       // {fonts:[], missing:bool} 陌生字体提醒
+const dxfFontWarnClosed = ref(false)  // 当前图的提醒是否被用户关闭（换图重置）
 let dxfViewer = null
 let dxfLoadSeq = 0
+
+// AutoCAD 标准西文字体 + 已加载的 Noto：Noto 可无损近似，不值得打扰用户
+const FONT_WARN_OK = /^(txt|monotxt|courier|simplex|romans|romant|italic|italicc|script|complex|noto)/i
+
+function buildFontWarn(viewer) {
+  // 字体名来自 analyzeDxfFile 的文件直扫（parser 按组2中文名做键会互相覆盖，不可用），
+  // 挑出既非已加载字体、也非 CAD 标准西文字体的"陌生字体"（天正/盈建科/PKPM 等专业 SHX）
+  try {
+    const unknown = new Set()
+    for (const f of dxfScanFonts.value) {
+      const base = String(f).replace(/\.(shx|ttf|otf|pfb)$/i, '').trim()
+      if (!FONT_WARN_OK.test(base)) unknown.add(String(f).trim())
+    }
+    if (!unknown.size) return null
+    return { fonts: [...unknown], missing: !!viewer.hasMissingChars }
+  } catch {
+    return null
+  }
+}
 
 function destroyDxfViewer() {
   dxfLoadSeq++  // 递增序列号，取消在途的 Load
   dxfLoading.value = false
+  dxfFontWarn.value = null
+  dxfFontWarnClosed.value = false
+  // 注意：dxfScanFonts 不在这里清——mountDxfViewer 先 destroy 再 Load，
+  // 而扫描结果是当前图刚产出的；它的生命周期跟 dxfUrl（_revokePreviews）一致
   if (dxfViewer) {
     try { dxfViewer.Destroy() } catch { /* 已销毁则忽略 */ }
     dxfViewer = null
@@ -798,7 +835,15 @@ async function mountDxfViewer() {
   try {
     const { DxfViewer } = await import('dxf-viewer')
     if (seq !== dxfLoadSeq || previewMode.value !== 'dxf' || !dxfHostRef.value) return
-    const viewer = new DxfViewer(dxfHostRef.value, { autoResize: true })
+    // fileEncoding：GBK 图（LibreDWG ANSI_936 产物）透传给 DxfFetcher 解码，
+    // 否则 UTF-8 强解中文全成问号（utils/dxfEncoding.js 判定）
+    const viewer = new DxfViewer(dxfHostRef.value, {
+      autoResize: true,
+      fileEncoding: dxfEncoding.value,
+      // worker 默认不回传 parsedDxf（DxfWorker: retainParsedDxf!==true → undefined），
+      // 不开则 STYLE 表读不到，陌生字体横幅永远出不来
+      retainParsedDxf: true,
+    })
     viewer.SetClearColor('#ffffff')  // 打印风格白底；黑白反转默认开，白色线自动转黑
     dxfViewer = viewer
     window.__dxfViewer = viewer  // 调试钩子（生产也保留：远程诊断相机/白屏用，只读）
@@ -808,7 +853,10 @@ async function mountDxfViewer() {
       workerFactory: () => new Worker(
         new URL('../workers/dxfWorker.js', import.meta.url), { type: 'module' }),
     })
-    if (seq === dxfLoadSeq) dxfLoading.value = false
+    if (seq === dxfLoadSeq) {
+      dxfLoading.value = false
+      dxfFontWarn.value = buildFontWarn(viewer)  // 陌生字体提醒（用户未关闭才显示）
+    }
   } catch (e) {
     console.error('[DXF 矢量] 加载失败：', e)
     if (seq === dxfLoadSeq && previewMode.value === 'dxf') {
@@ -1054,6 +1102,7 @@ function _revokePreviews() {
   previewUrls.value.forEach(u => URL.revokeObjectURL(u))
   previewUrls.value = []
   if (dxfUrl.value) { URL.revokeObjectURL(dxfUrl.value); dxfUrl.value = '' }
+  dxfScanFonts.value = []  // 与 dxfUrl 同生命周期：换图时旧扫描结果作废
 }
 
 async function loadPreview(fid) {
@@ -1067,8 +1116,13 @@ async function loadPreview(fid) {
     const { data } = await drawingApi.image(fid)
     previewUrls.value.push(URL.createObjectURL(data))
     // 静默探测 DXF 源文件（DWG/DXF 上传有，PDF 无 → 404 不显示矢量按钮）
-    drawingApi.dxfFile(fid).then(({ data }) => {
-      if (data && data.size > 0) dxfUrl.value = URL.createObjectURL(data)
+    drawingApi.dxfFile(fid).then(async ({ data }) => {
+      if (data && data.size > 0) {
+        const r = await analyzeDxfFile(data)  // 编码判定 + STYLE 字体清单（一次扫描）
+        dxfEncoding.value = r.encoding
+        dxfScanFonts.value = r.fonts
+        dxfUrl.value = URL.createObjectURL(data)
+      }
     }).catch(() => {})
     // 多页（PDF 多页 / 多图框切片）：先取总页数，只预载前 3 页，其余翻页时懒加载
     // （切片图可能几十页，全量预载会把浏览器内存打爆）
@@ -1655,6 +1709,35 @@ onMounted(() => {
   border-radius: 4px;
 }
 .dxf-host .pz-hint { z-index: 5; }
+/* 陌生字体提醒（左上角浮层，canvas 由 dxf-viewer append 后插入，靠 z-index 压住） */
+.dxf-font-warn {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: auto;
+  z-index: 7;
+  max-width: calc(100% - 16px);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b88230;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.dxf-font-warn-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: #b88230;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 0 2px;
+}
 .dxf-loading {
   position: absolute;
   top: 50%;
