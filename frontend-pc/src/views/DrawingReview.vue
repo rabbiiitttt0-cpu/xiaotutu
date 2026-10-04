@@ -801,7 +801,7 @@ async function mountDxfViewer() {
     const viewer = new DxfViewer(dxfHostRef.value, { autoResize: true })
     viewer.SetClearColor('#ffffff')  // 打印风格白底；黑白反转默认开，白色线自动转黑
     dxfViewer = viewer
-    if (import.meta.env.DEV) window.__dxfViewer = viewer  // 本地调试钩子（构建产物不含）
+    window.__dxfViewer = viewer  // 调试钩子（生产也保留：远程诊断相机/白屏用，只读）
     await viewer.Load({
       url,
       fonts: ['/fonts/NotoSansSC-VF.ttf'],
