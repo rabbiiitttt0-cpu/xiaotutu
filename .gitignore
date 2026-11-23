@@ -21,3 +21,18 @@ dist/
 # 系统
 .DS_Store
 Thumbs.db
+
+# Autodesk 版权 CAD 西文字体（1996 Copyright, All rights reserved）不分发；
+# 本地/部署自行放置，缺失时矢量预览自动回退 NotoSansSC
+/frontend-pc/public/fonts/COMPLEX_.TTF
+/frontend-pc/public/fonts/COUR.TTF
+/frontend-pc/public/fonts/GDT_____.TTF
+/frontend-pc/public/fonts/ISOCP___.TTF
+/frontend-pc/public/fonts/ITALICC_.TTF
+/frontend-pc/public/fonts/ITALIC__.TTF
+/frontend-pc/public/fonts/MONOTXT_.TTF
+/frontend-pc/public/fonts/ROMANS__.TTF
+/frontend-pc/public/fonts/ROMANT__.TTF
+/frontend-pc/public/fonts/SCRIPTS_.TTF
+/frontend-pc/public/fonts/SIMPLEX_.TTF
+/frontend-pc/public/fonts/TXT_____.TTF

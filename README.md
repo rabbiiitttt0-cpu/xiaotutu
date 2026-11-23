@@ -110,5 +110,6 @@ docker compose -p xiaotutu up -d
 - **LibreDWG 二进制**（`assets/bin/libredwg/`）：GPL-3.0，以独立进程方式调用，说明见其 `README.txt`
 - **PyMuPDF**（PDF 解析）：AGPL-3.0
 - **dxf-viewer**（DXF 矢量预览，含 `frontend-pc/patches/` 内补丁）：MPL-2.0
+- **CAD 西文单线字体**（TXT/ROMANS/GDT 等，DXF 矢量预览用）：Autodesk 版权，**不随仓库分发**；需要字体还原时可将自有字体放入 `frontend-pc/public/fonts/`（缺失时自动回退 NotoSansSC）
 
 使用或部署本项目即涉及上述组件的许可证义务，请知悉。
