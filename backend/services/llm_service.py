@@ -10,6 +10,40 @@ from typing import Optional
 
 from config import AppConfig, LLMProviderConfig, load_config
 
+# 复用 HTTP 客户端：openai/anthropic 每次调用新建 client 会重建底层连接池，
+# 多 Agent 串联（一次问答 3~5 次 LLM 调用）反复 TCP+TLS 握手。按 (api_key, base_url)
+# 缓存 client 实例——配置变更（key/url 变）自然换新，无需手动失效。
+_openai_clients: dict = {}
+_anthropic_clients: dict = {}
+_MAX_CLIENTS = 64
+
+
+def _get_openai_client(api_key: str, base_url: str):
+    from openai import AsyncOpenAI
+    import httpx
+    key = (api_key, base_url)
+    client = _openai_clients.get(key)
+    if client is None:
+        if len(_openai_clients) >= _MAX_CLIENTS:
+            _openai_clients.clear()
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url,
+                             timeout=httpx.Timeout(300.0, connect=30.0))
+        _openai_clients[key] = client
+    return client
+
+
+def _get_anthropic_client(api_key: str, base_url: str):
+    import anthropic
+    key = (api_key, base_url or None)
+    client = _anthropic_clients.get(key)
+    if client is None:
+        if len(_anthropic_clients) >= _MAX_CLIENTS:
+            _anthropic_clients.clear()
+        client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url or None,
+                                          timeout=300.0)
+        _anthropic_clients[key] = client
+    return client
+
 
 class LLMProvider(ABC):
     """LLM Provider基类"""
@@ -90,14 +124,7 @@ class OpenAIProvider(LLMProvider):
     async def chat_complete(
         self, messages, model="", temperature=0.7, max_tokens=4096
     ) -> str:
-        import httpx
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            timeout=httpx.Timeout(300.0, connect=30.0),
-        )
+        client = _get_openai_client(self.config.api_key, self.config.base_url)
         model_name = model or self.config.model
         import time as _time
         _t0 = _time.time()
@@ -165,13 +192,7 @@ class ClaudeProvider(LLMProvider):
     async def chat_complete(
         self, messages, model="", temperature=0.7, max_tokens=4096
     ) -> str:
-        import anthropic
-
-        client = anthropic.AsyncAnthropic(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url or None,
-            timeout=300.0,
-        )
+        client = _get_anthropic_client(self.config.api_key, self.config.base_url)
         model_name = model or self.config.model
 
         # 如果消息包含图片，转换为Anthropic格式

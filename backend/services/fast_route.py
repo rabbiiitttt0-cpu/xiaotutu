@@ -56,8 +56,26 @@ _CLASSIFY_SYSTEM = """你是图纸问答路由器。判断用户问题能否完�
 只输出一个英文单词：FAST 或 SLOW，不要输出任何其他内容。"""
 
 
+_CLASSIFY_CACHE: dict = {}          # (provider_index, 问题指纹) → bool
+_CLASSIFY_CACHE_MAX = 5000
+
+
+def _classify_key(question: str) -> str:
+    """问题指纹：去空白 + 小写。分类只依赖问题文本，与图纸内容无关 → 可永久缓存。"""
+    return re.sub(r"\s+", "", (question or "")).lower()
+
+
 async def llm_classify(question: str, llm_service, provider_index: int) -> bool:
-    """轻量 LLM 单次分类。返回 True=快路。异常/解析失败/预算耗尽一律按慢路（False）"""
+    """轻量 LLM 单次分类。返回 True=快路。异常/解析失败/预算耗尽一律按慢路（False）。
+
+    结果只依赖问题文本（与图纸无关），按 (provider_index, 问题指纹) 缓存，
+    避免同一/相似问题重复跑分类调用；provider 变更自动换 key 重分类。"""
+    fkey = _classify_key(question)
+    if not fkey:
+        return False
+    ckey = (provider_index, fkey)
+    if ckey in _CLASSIFY_CACHE:
+        return _CLASSIFY_CACHE[ckey]
     try:
         out = await llm_service.chat_complete(
             messages=[{"role": "system", "content": _CLASSIFY_SYSTEM},
@@ -65,9 +83,14 @@ async def llm_classify(question: str, llm_service, provider_index: int) -> bool:
             provider_index=provider_index, temperature=0.1, max_tokens=2048,
             module="drawing_classify")
     except Exception:
-        return False
-    txt = (out or "").upper()
-    return "FAST" in txt and "SLOW" not in txt
+        result = False
+    else:
+        txt = (out or "").upper()
+        result = "FAST" in txt and "SLOW" not in txt
+    if len(_CLASSIFY_CACHE) >= _CLASSIFY_CACHE_MAX:
+        _CLASSIFY_CACHE.clear()
+    _CLASSIFY_CACHE[ckey] = result
+    return result
 
 
 _FAST_SYSTEM = """你是图纸文本数据摘取与归纳器。只依据用户提供的【图纸文本数据】回答，禁止想象或推断图像内容。

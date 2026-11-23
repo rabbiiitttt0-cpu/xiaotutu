@@ -25,7 +25,9 @@ _SYS = """你是工程图纸定位专家。任务：根据用户问题，从给�
 
 定位分三级：
 1. 图纸定位：结合文件名、图纸摘要、批次关系描述，判断问题涉及哪几张图纸
-2. 图幅定位：每张图纸可能含多个图幅（p1/p2/…，各有图名），判断涉及哪几个图幅
+2. 图幅定位：每张图纸可能含多个图幅，判断涉及哪几个图幅。图幅编号规则：
+   p0 = 整图总览；p1/p2/… = 该图切分出的图框切片。目录卡中「图幅」行未列出的图纸
+   是单幅整图，只有 p0 一个图幅
 3. 部位定位：图幅内的具体部位——轴号交点、表格/详图区、方位区域；对比类问题（如
   "一层到二层哪些柱子截面变了"）选两个图幅各给一个 frame 型 target 即可
 
@@ -64,6 +66,8 @@ def _catalog_text(cards: list[dict], relations_desc: str = "") -> str:
             line += f"\n  图幅：{fl}"
         elif c.get("image_count", 0) > 1:
             line += f"\n  图幅：共{c['image_count'] - 1}个切片（标题未知）"
+        else:
+            line += "\n  图幅：p0（整图，无切片）"
         lines.append(line)
     text = "\n".join(lines)
     if relations_desc:
@@ -93,12 +97,17 @@ def _validate(parsed, cards) -> dict | None:
             if not isinstance(f, dict):
                 continue
             fname = str(f.get("frame") or "")
-            # frame 形如 p1/p2…；无切片图纸只允许 p0（整图）
+            # frame 形如 p1/p2…；无切片图纸只有整图 p0
             try:
                 idx = int(fname.lstrip("pP"))
             except ValueError:
                 continue
-            if idx < 0 or idx > n_frames:
+            # 无切片图纸（n_frames==0）只有一张整图：模型按 1-based 习惯给 p1 等时
+            # 一律归一到 p0，而不是整条 selection 静默丢弃（生产事故：综观全套题
+            # 其余无切片图全被丢，只剩封面，2026-10-29 会话600）
+            if n_frames == 0:
+                idx = 0
+            elif idx < 0 or idx > n_frames:
                 continue
             targets = []
             for t in (f.get("targets") or [])[:MAX_TARGETS_PER_FRAME]:

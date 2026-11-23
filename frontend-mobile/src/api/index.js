@@ -147,7 +147,6 @@ export const drawing = {
   getSession: (id) => api.get(`/drawing/sessions/${id}`),
   deleteSession: (id) => api.delete(`/drawing/sessions/${id}`),
   image: (fileId) => api.get(`/drawing/${fileId}/image`, { responseType: 'blob' }),
-  imageSvg: (fileId) => api.get(`/drawing/${fileId}/image?fmt=svg`, { responseType: 'blob' }),
   imageN: (fileId, n) => api.get(`/drawing/${fileId}/image/${n}`, { responseType: 'blob' }),
   pages: (fileId) => api.get(`/drawing/${fileId}/pages`),
   usage: () => api.get('/drawing/usage'),

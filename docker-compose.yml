@@ -30,7 +30,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./output:/app/output
-    mem_limit: 3g          # 内存上限，OOM 只杀自己不拖垮别的服务
+    mem_limit: 4g          # 内存上限，OOM 只杀自己不拖垮别的服务（2026-10-05 3g→4g：大图预处理基线 2.6G + 病态 hatch 阶梯期波动 3003MB 距 3g 仅剩 69MB）
     expose:
       - "7780"
     depends_on:

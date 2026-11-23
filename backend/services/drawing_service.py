@@ -348,12 +348,11 @@ def patch_ezdxf_acis_tolerance():
 
 
 def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
-    """把 DXF 模型空间渲染为 PNG（白底黑线，供视觉模型识图）。
-    同时尝试输出 SVG 矢量图（文字转曲线路径，浏览器预览无限放大不糊），
-    返回 PNG 路径；SVG 结果存于同名 .svg（失败仅无 SVG，不影响 PNG）。
+    """把 DXF 模型空间渲染为 PNG（白底黑线，供视觉模型识图），返回 PNG 路径。
 
     用 ezdxf 自带 drawing 插件（matplotlib 后端），零新依赖；
     中文标注走 chart_render 的内置思源黑体注册。失败返回 None（不阻断上传流程）。
+    大图另出 _hi.png 高清版（预览接口放大用）。
     """
     try:
         patch_ezdxf_acis_tolerance()
@@ -362,7 +361,9 @@ def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
         import matplotlib.pyplot as plt
         from ezdxf.addons.drawing import RenderContext, Frontend
         from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-        from ezdxf.addons.drawing.config import Configuration, BackgroundPolicy, ColorPolicy
+        from ezdxf.addons.drawing.config import (
+            Configuration, BackgroundPolicy, ColorPolicy, HatchPolicy,
+        )
 
         try:
             doc = ezdxf.readfile(file_path)
@@ -381,22 +382,63 @@ def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
         cfg = Configuration(
             background_policy=BackgroundPolicy.WHITE,
             color_policy=ColorPolicy.BLACK,
+            # 防 OOM：病态填充实体（边界/图案计算失控）在默认 30s 窗口内 lines
+            # 列表可涨 5.1G（2026-10-05 实测：学校剖面 HATCH#14，容器 3G 墙下
+            # abort 前即被杀 → 图 failed）。6s≈该实体 960MB+基线 0.9G≈峰值 2G
+            #（3G 墙余 1G；为正常 hatch 均值 0.8s 的 7.5 倍余量）；超时放弃该实体
+            # 的填充图案线（其余实体照画，ezdxf 自带降级）。
+            hatching_timeout=6.0,
         )
-        Frontend(ctx, backend, config=cfg).draw_layout(msp, finalize=True)
+        fe = Frontend(ctx, backend, config=cfg)
+        # 第二层防 OOM（2026-10-05 平面图实测）：整图 hatch 图案计算占预处理
+        # 92%（48.5MB DXF 全程 1062s 中 963s），80 个病态实体各吃 ~13s（6s 窗口
+        # + ~7s 不可中断的单次 path 求交段——terminate 检查点在 path 之间，压
+        # 窗口到 0.3s 也只能 7.3s/个，80 个仍要 584s）。吃满窗口 = 病态实锤 →
+        # 阶梯降级：首次 6→3s，第 3 次→1s，第 10 次→SHOW_OUTLINE（后续填充只画
+        # 边界轮廓，整套图案求交直接跳过，秒级；abort 前已收集的图案线照画）。
+        # 无 abort 的正常图永远保持 6s+NORMAL，不受影响（剖面/立面回归为准）。
+        # Configuration 是 frozen dataclass → dataclasses.replace 换新对象挂
+        # fe.config；draw_hatch_pattern/draw_hatch_entity 每次进入现读 config，
+        # 下个实体生效。
+        import time as _time
+        from dataclasses import replace as _dc_replace
+        _hatch_state = {"slow": 0}
+        _orig_hatch = fe.draw_hatch_pattern
+
+        def _traced_hatch(polygon, paths, properties):
+            t0 = _time.perf_counter()
+            try:
+                _orig_hatch(polygon, paths, properties)
+            finally:
+                # abort 必然耗时 ≥ 窗口；DenseHatchingLinesError（密度过大
+                # 主动放弃）同样计入——都是病态信号
+                if _time.perf_counter() - t0 >= fe.config.hatching_timeout:
+                    _hatch_state["slow"] += 1
+                    n = _hatch_state["slow"]
+                    if n >= 10:
+                        if fe.config.hatch_policy != HatchPolicy.SHOW_OUTLINE:
+                            fe.config = _dc_replace(
+                                fe.config, hatch_policy=HatchPolicy.SHOW_OUTLINE)
+                    elif n >= 3:
+                        if 1.0 < fe.config.hatching_timeout:
+                            fe.config = _dc_replace(fe.config, hatching_timeout=1.0)
+                    else:
+                        if 3.0 < fe.config.hatching_timeout:
+                            fe.config = _dc_replace(fe.config, hatching_timeout=3.0)
+
+        fe.draw_hatch_pattern = _traced_hatch
+        fe.draw_layout(msp, finalize=True)
         fig.savefig(out_path, dpi=dpi, facecolor="white")
-        # SVG 矢量预览（文字转曲线路径 svg.fonttype='path'，无客户端字体依赖）。
-        # 真实大图纸 SVG 可达百MB级（实测8MB DXF→116MB SVG，浏览器必卡死）：
-        # >25MB 放弃 SVG，改出 400dpi 高清 PNG 作预览（放大清晰度约2.5倍于默认160dpi）
+        # 高清兜底：ezdxf finalize 会按内容宽高比重置画布，默认160dpi 常只有
+        # 640~1900px（放大即糊）——出图长边超 1600px 时按长边4800px 反推 dpi
+        #（300~1200钳制）再出一张 _hi.png（预览接口放大用，_hi 不匹配 _p*.png
+        # 通配，LLM 视觉通道不受影响）。
+        # 2026-10-05 取消 SVG 生成：预览已由 PNG+DXF 矢量预览覆盖，SVG 无消费方，
+        # 且大图百MB级 savefig 拖慢预处理（平面图 900s 超时嫌疑）；原「SVG>25MB
+        # 才出 _hi」条件相应改为按画布像素判断。
         try:
-            import matplotlib as _mpl
-            _mpl.rcParams["svg.fonttype"] = "path"
-            svg_path = out_path.rsplit(".", 1)[0] + ".svg"
-            fig.savefig(svg_path, format="svg", facecolor="white")
-            if Path(svg_path).stat().st_size > 25 * 1024 * 1024:
-                Path(svg_path).unlink(missing_ok=True)
-                # 高清兜底：ezdxf finalize 会按内容宽高比重置画布，默认160dpi常只有
-                # 640~1900px（放大即糊的元凶）——按长边4800px反推dpi（300~1200钳制）
-                w_in, h_in = fig.get_size_inches()
+            w_in, h_in = fig.get_size_inches()
+            if max(w_in, h_in) * dpi > 1600:
                 hi_dpi = int(min(1200, max(300, 4800 / max(w_in, h_in, 0.1))))
                 fig.savefig(out_path.rsplit(".", 1)[0] + "_hi.png", dpi=hi_dpi, facecolor="white")
         except Exception:
@@ -415,7 +457,9 @@ def render_dxf_png(file_path: str, out_path: str, dpi: int = 160) -> str | None:
 
 # ==================== PDF 图纸支持（2026-09-14：设计院交付物以 PDF 为主） ====================
 
-PDF_MAX_PAGES = 3        # 单份 PDF 最多取前 3 页（视觉问答带图上限，控制 token 成本）
+PDF_MAX_PAGES = 3        # 单份 PDF 渲染进视觉通道的页数（带图上限，控制 token 成本；深页由路由按需补渲）
+PDF_TEXT_PAGES = 10      # 文字层/OCR 提取页数上限（2026-10-04 用户要求从 3 调高：多页扫描件前 3 页外
+                         #  无 OCR 也无检索 → 问答空结果；渲染仍是 3 页，文字通道先行放宽）
 PDF_RENDER_DPI = 180     # A1 图纸约 5900x4200px，兼顾标注可读性与 PNG 体积
 PDF_TEXT_MAX = 8000      # 注入 prompt 的文本总量上限
 OCR_DPI = 150            # 本地 OCR 渲染精度（无文字层时补文字层，KB 同款 RapidOCR）
@@ -433,12 +477,13 @@ def _ai_cfg() -> dict:
         return {
             "tile_enabled": getattr(s, "drawing_tile_enabled", True),
             "max_pages": getattr(s, "drawing_pdf_max_pages", PDF_MAX_PAGES),
+            "text_pages": getattr(s, "drawing_pdf_text_pages", PDF_TEXT_PAGES),
             "text_max": getattr(s, "drawing_pdf_text_max", PDF_TEXT_MAX),
             "ocr_dpi": getattr(s, "drawing_ocr_dpi", OCR_DPI),
             "ocr_text_max": getattr(s, "drawing_ocr_text_max", OCR_TEXT_MAX),
         }
     except Exception:
-        return {"tile_enabled": True, "max_pages": PDF_MAX_PAGES,
+        return {"tile_enabled": True, "max_pages": PDF_MAX_PAGES, "text_pages": PDF_TEXT_PAGES,
                 "text_max": PDF_TEXT_MAX, "ocr_dpi": OCR_DPI, "ocr_text_max": OCR_TEXT_MAX}
 
 
@@ -491,7 +536,7 @@ def parse_pdf_drawing(file_path: str, display_name: str | None = None) -> dict:
     page_texts = []
     title_block = ""
     for i, page in enumerate(doc):
-        if i >= cfg["max_pages"]:
+        if i >= cfg["text_pages"]:
             break
         try:
             page_texts.append(page.get_text("text").strip())
@@ -514,33 +559,41 @@ def parse_pdf_drawing(file_path: str, display_name: str | None = None) -> dict:
     full = "\n".join(t for t in page_texts if t)
     ocr_text = ""
     ocr_stats = {}
+    ocr_pages = None   # 按页 OCR 文本：扫描件存入 page_texts，深页路由据此检索（矢量 PDF 不设，路由现场全页提取）
     dense = False
     # 无文字层（扫描件/文字转曲）→ RapidOCR 本地补文字层（视觉+OCR 双通道互验）
     if len(full.strip()) < 100:
         try:
             doc = fitz.open(file_path)
-            all_rows, page_h = [], 0
+            all_rows, ocr_pages = [], []
             for i, page in enumerate(doc):
-                if i >= cfg["max_pages"]:
+                if i >= cfg["text_pages"]:
                     break
-                rows, page_h = _ocr_page_image(page, dpi=cfg["ocr_dpi"])
+                rows, _ = _ocr_page_image(page, dpi=cfg["ocr_dpi"])
+                # 页内按阅读顺序排序（先上后下、同段先左后右），再按页序拼接——
+                # 替代旧的跨页全局 sort（会把第2页的行按坐标混进第1页行之间）
+                rows.sort(key=lambda r: (round(r[3] / 20), r[2]))
+                ocr_pages.append("\n".join(r[0] for r in rows))
                 all_rows.extend(rows)
             doc.close()
             if all_rows:
-                # 按阅读顺序排序（先上后下、同段先左后右）
-                all_rows.sort(key=lambda r: (round(r[3] / 20), r[2]))
-                ocr_text = "\n".join(r[0] for r in all_rows)[:cfg["ocr_text_max"]]
+                ocr_text = "\n".join(ocr_pages)[:cfg["ocr_text_max"]]
                 heights = sorted(r[1] for r in all_rows)
                 median_h = heights[len(heights) // 2]
                 ocr_stats = {"boxes": len(all_rows), "median_h_px": round(median_h, 1)}
                 # 密集小字判定：框多且框矮 → 触发分块渲染
                 dense = len(all_rows) >= DENSE_BOX_COUNT and median_h <= DENSE_MEDIAN_H_PX
+            else:
+                ocr_pages = None  # 一页都没识别出字：不留空壳页（路由会因全空直接返回）
         except Exception:
+            ocr_pages = None  # OCR 失败不留半截页，行为回退到旧路径（路由返回空）
             import traceback
             traceback.print_exc()  # OCR 失败留痕，不影响主流程
 
     lines = [f"# PDF图纸分析: {shown_name}", ""]
-    lines.append(f"页数: {total_pages}" + (f"（取前 {cfg['max_pages']} 页分析）" if total_pages > cfg["max_pages"] else ""))
+    lines.append(f"页数: {total_pages}" + (
+        f"（文字取前 {cfg['text_pages']} 页、渲染前 {cfg['max_pages']} 页分析）"
+        if total_pages > min(cfg["text_pages"], cfg["max_pages"]) else ""))
     if title_block:
         lines.append("")
         lines.append("## 图框信息（右下角标题栏区域：项目名称/专业/图名/图号/版本等）")
@@ -557,7 +610,7 @@ def parse_pdf_drawing(file_path: str, display_name: str | None = None) -> dict:
     else:
         lines.append("")
         lines.append("## 图纸无文字层（扫描件），内容以渲染图像为准")
-    return {
+    result = {
         "filename": shown_name,
         "doc_type": "pdf",
         "page_count": total_pages,
@@ -567,6 +620,10 @@ def parse_pdf_drawing(file_path: str, display_name: str | None = None) -> dict:
         "dense": dense,
         "description": "\n".join(lines),
     }
+    if ocr_pages:
+        # 扫描件：按页 OCR 文本进检索通道（矢量 PDF 不设该字段，路由走现场全页提取）
+        result["page_texts"] = ocr_pages
+    return result
 
 
 def render_pdf_pngs(file_path: str, out_dir: str, file_id: str,

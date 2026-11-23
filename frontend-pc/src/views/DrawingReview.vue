@@ -793,8 +793,9 @@ const dxfFontWarnClosed = ref(false)  // 当前图的提醒是否被用户关闭
 let dxfViewer = null
 let dxfLoadSeq = 0
 
-// AutoCAD 标准西文字体 + 已加载的 Noto：Noto 可无损近似，不值得打扰用户
-const FONT_WARN_OK = /^(txt|monotxt|courier|simplex|romans|romant|italic|italicc|script|complex|noto)/i
+// 白名单 = CAD 标准西文（public/fonts 已装 TTF 版，TextRenderer 全局找字形能渲染）+ Noto。
+// 未命中的（tssdeng/hztxt/gbcbig 等专业 SHX）opentype.js 解析不了，才是真"未安装"
+const FONT_WARN_OK = /^(txt|monotxt|courier|simplex|romans|romant|italic|italicc|script|complex|isocp|gdt|noto)/i
 
 function buildFontWarn(viewer) {
   // 字体名来自 analyzeDxfFile 的文件直扫（parser 按组2中文名做键会互相覆盖，不可用），
@@ -849,7 +850,24 @@ async function mountDxfViewer() {
     window.__dxfViewer = viewer  // 调试钩子（生产也保留：远程诊断相机/白屏用，只读）
     await viewer.Load({
       url,
-      fonts: ['/fonts/NotoSansSC-VF.ttf'],
+      // TextRenderer 按数组顺序找第一个含字形的字体（fontFetchers 顺序队列），
+      // 必须西文在前、Noto 兜底在后——Noto 含全部西文字形，放前面会把
+      // CAD 单线字体全挡住。中文时西文字体无 CJK 字形会自动轮到 Noto。
+      fonts: [
+        '/fonts/TXT_____.TTF',    // txt 最常用（图纸字体清单出现频次第一）
+        '/fonts/SIMPLEX_.TTF',
+        '/fonts/ROMANS__.TTF',
+        '/fonts/ROMANT__.TTF',
+        '/fonts/ITALIC__.TTF',
+        '/fonts/ITALICC_.TTF',
+        '/fonts/MONOTXT_.TTF',
+        '/fonts/COMPLEX_.TTF',
+        '/fonts/SCRIPTS_.TTF',
+        '/fonts/COUR.TTF',
+        '/fonts/ISOCP___.TTF',
+        '/fonts/GDT_____.TTF',    // 形位公差符号框格
+        '/fonts/NotoSansSC-VF.ttf',  // 中文兜底（OFL 协议可分发）必须最后
+      ],
       workerFactory: () => new Worker(
         new URL('../workers/dxfWorker.js', import.meta.url), { type: 'module' }),
     })

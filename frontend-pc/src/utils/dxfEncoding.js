@@ -106,8 +106,16 @@ export async function analyzeDxfFile(blob) {
       isStrictUtf8 = false
     }
 
-    // latin1 逐字节映射（标签必须是 latin1/iso-8859-1；'latin-1' 不是合法标签会抛 RangeError）
-    const raw = new TextDecoder('latin1').decode(buf)
+    // 逐字节映射读行。不能用 TextDecoder('latin1'/'iso-8859-1')：WHATWG 里这两个
+    // 标签实际指向 windows-1252，0x80–0x9F 字节被换成 €/‰ 等字符，下面 charCodeAt
+    // &0xff 还原时这些字节全毁（坂田学校图 2.5MB 实测损 4125 字节）——UTF-8 中文的
+    // 连续字节大量落在 0x80–0x9F，严格校验随即失败，误落 GBK 分支判成 gbk，
+    // 整份 UTF-8 图按 GBK 解出满屏乱码（2026-10-05）。手写 fromCharCode 才是真 latin1。
+    const bytes = new Uint8Array(buf)
+    let raw = ''
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      raw += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+    }
     const lines = raw.split(/\r?\n/)
 
     const encoding = isStrictUtf8 ? 'utf-8' : detectEncoding(lines)

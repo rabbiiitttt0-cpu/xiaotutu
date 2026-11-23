@@ -107,11 +107,17 @@ def mask_text(text: str, cmap: CipherMap) -> str:
 
 def mask_info(info: dict, cmap: CipherMap) -> dict:
     """对解析结果 info 的文字层整体脱敏，返回脱敏后的副本（原 dict 不变）。
-    覆盖：description / title_block / ocr_text / text_annotations[].text"""
+    覆盖：description / title_block / ocr_text / page_texts[]（扫描件按页 OCR）
+          / text_annotations[].text"""
     out = dict(info)
     for key in ("description", "title_block", "ocr_text"):
         if isinstance(info.get(key), str) and info[key]:
             out[key] = mask_text(info[key], cmap)
+    # 扫描件按页 OCR 文本（深页路由检索通道）——含工程名/单位名，必须同口径脱敏
+    pages = info.get("page_texts")
+    if isinstance(pages, list):
+        out["page_texts"] = [mask_text(t, cmap) if isinstance(t, str) and t else t
+                             for t in pages]
     annotations = info.get("text_annotations")
     if annotations:
         out["text_annotations"] = [

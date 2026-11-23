@@ -426,22 +426,13 @@ def _cached_file(request: Request, path: Path, media_type: str):
 async def drawing_image(request: Request, file_id: str, fmt: str = "",
                         user: User = Depends(get_current_user)):
     """图纸渲染预览图（首页；路由 include 级已带登录认证，勿改裸静态挂载）。
-    fmt=svg 时优先返回矢量预览（DXF 无限放大不糊；无 SVG 回退 PNG）"""
+    fmt 参数已废弃（SVG 预览 2026-10-05 取消：DXF 矢量预览覆盖需求，无消费方），
+    保留签名向后兼容，任何值均返回 PNG。"""
     _require_file(file_id, _load_context(file_id), user)
-    if fmt == "svg":
-        svg = UPLOAD_DIR / f"{file_id}.svg"
-        if not svg.exists():
-            # 懒生成：SVG 功能上线前上传的 DXF，首次请求时补渲染（render 同图双出）
-            dxf = UPLOAD_DIR / f"{file_id}.dxf"
-            if dxf.exists():
-                render_dxf_png(str(dxf), str(UPLOAD_DIR / f"{file_id}.png"))
-        if svg.exists():
-            return _cached_file(request, svg, "image/svg+xml")
-        raise HTTPException(status_code=404, detail="该图纸无矢量预览（非DXF或渲染失败）")
     pngs = _png_paths(file_id)
     if not pngs:
         raise HTTPException(status_code=404, detail="预览图不存在（渲染失败或未上传）")
-    # 大图纸无 SVG 时的高清预览版（400dpi，_hi.png 不匹配 _p*.png 通配，LLM 不受影响）
+    # 大图纸高清预览版（_hi.png 不匹配 _p*.png 通配，LLM 视觉通道不受影响）
     hi = UPLOAD_DIR / f"{file_id}_hi.png"
     if hi.exists():
         return _cached_file(request, hi, "image/png")
@@ -978,8 +969,45 @@ def _set_text_context(selected: list[dict], question: str = "") -> str:
     return "\n\n".join(parts)
 
 
+_TOC_ROW_RE = re.compile(
+    r"^([一-鿿]+、[^\.]{2,60}?)\s*[\.·…]{3,}\s*(\d{1,3})\s*$", re.M)
+
+
+def _toc_direct_pages(page_texts: list, bigrams: set, total: int) -> set:
+    """目录章节直达：目录页里每行是「章节名......页码」，问题 bigram 与章节名
+    交集≥2 直达；交集==1 但该关键词只出现在一个章节名（如「监测」只在
+    「八、支护结构及周边环境监测」）也直达。无目录/解析失败返回空集，
+    不影响正文 bigram 打分路径（2026-10-04 二期，修复深页答案页选不中）。"""
+    for t in (page_texts or [])[:2]:
+        if not t:
+            continue
+        rows = _TOC_ROW_RE.findall(t)
+        if len(rows) < 3:
+            continue
+        hits: set = set()
+        singles: dict = {}
+        for name, pg in rows:
+            try:
+                pn = int(pg)
+            except ValueError:
+                continue
+            if not 1 <= pn <= max(total, 1):
+                continue
+            cb = {name[i:i + 2] for i in range(len(name) - 1)} - _ANNO_STOP
+            inter = bigrams & cb
+            if len(inter) >= 2:
+                hits.add(pn)
+            elif len(inter) == 1:
+                singles.setdefault(next(iter(inter)), []).append(pn)
+        for pgs in singles.values():
+            if len(pgs) == 1:   # 关键词仅命中一个章节名 → 放行
+                hits.add(pgs[0])
+        return hits
+    return set()
+
+
 def _pdf_route_pages(sheet: dict, question: str, project_id: int = 0,
-                     max_new_pages: int = 2, max_page_chars: int = 700) -> str:
+                     max_new_pages: int = 5, max_page_chars: int = 2500) -> str:
     """PDF 深页路由：全页文字层按问题检索 → 命中但未渲染的页按需补渲
     （落盘 {file_id}_pN.png，_png_paths 自动纳入图像通道），返回命中页文本摘录
     （项目模式先按项目对照表脱敏）。无文字层/无命中/非 PDF 返回 ""。
@@ -1033,8 +1061,11 @@ def _pdf_route_pages(sheet: dict, question: str, project_id: int = 0,
         if cmap:
             page_texts = [mask_text(t, cmap) if t else t for t in page_texts]
             save_project_cipher(pdir, cmap)  # 页文本可能引入新实体，回写对照表
-        info["page_texts"] = page_texts
-        _save_context(file_id, info)
+        # 全空（扫描件且预处理未存 OCR 页文本）不缓存：空串列表一旦落盘会永久占住
+        # page_texts 字段（is None 判断不再成立），重新预处理前 OCR 值再也补不进来
+        if any(page_texts):
+            info["page_texts"] = page_texts
+            _save_context(file_id, info)
     if not page_texts:
         return ""
 
@@ -1049,9 +1080,12 @@ def _pdf_route_pages(sheet: dict, question: str, project_id: int = 0,
         if hit:
             scored.append((hit, i))
     scored.sort(key=lambda x: -x[0])
-    picked = sorted(i + 1 for _, i in scored[:3])  # 1-based，按页码顺序注入
+    # top3→top5 + 目录章节直达并集（2026-10-04 二期：答案页在 top3 外漏答）
+    picked = {i + 1 for _, i in scored[:5]}
+    picked |= _toc_direct_pages(page_texts, bigrams, len(page_texts))
     if not picked:
         return ""
+    picked = sorted(picked)  # 1-based，按页码顺序注入
 
     # 命中页里超出已渲染范围的，按需补渲（首轮 max_pages 页之外）
     if src:
